@@ -1,0 +1,20 @@
+[project]
+name = "boardy"
+version = "0.1.0"
+description = "Personal board-game inventory chatbot"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "fastapi>=0.115.0",
+    "openpyxl>=3.1.5",
+    "python-dotenv>=1.0.1",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.20",
+    # Step 2 (rulebook RAG): local embeddings + PDF parsing
+    "sentence-transformers>=3.0.0",
+    "pypdf>=5.0.0",
+    "numpy>=1.26.0",
+]
+
+[tool.uv]
+package = false

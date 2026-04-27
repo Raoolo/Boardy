@@ -3,10 +3,18 @@
 .env.*
 !.env.example
 
-# DB
+# DB & backups
 *.db
 *.sqlite
 *.sqlite3
+*.bak
+
+# Rulebook PDFs (copyrighted content + bulky binaries — keep folder, ignore contents)
+rulebooks/*.pdf
+rulebooks/*.PDF
+
+# Generated ETL artifacts
+etl/unparsed.txt
 
 # Python
 __pycache__/
