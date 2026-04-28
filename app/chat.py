@@ -1,6 +1,8 @@
 """Claude tool-use chat loop for Boardy."""
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import os
 from typing import Any
@@ -8,6 +10,15 @@ from typing import Any
 from anthropic import Anthropic
 
 from .tools import TOOL_FUNCS, TOOLS
+
+
+@functools.cache
+def _accepts_source(name: str) -> bool:
+    """True if a tool function declares a `_source` kwarg (write tools do, readers don't)."""
+    fn = TOOL_FUNCS.get(name)
+    if fn is None:
+        return False
+    return "_source" in inspect.signature(fn).parameters
 
 # Trusted board-game / sleeve sources. Add domains here as you discover gaps.
 ALLOWED_DOMAINS = [
@@ -49,6 +60,8 @@ The DB follows a star-schema:
   each linked many-to-many via `game_designers`, `game_publishers`, `game_categories`,
   `game_mechanics`. Use list-typed args (`designers=[...]`) on add_game/update_game.
 - Facts: `sleeve_requirements` (game × size × count), `sleeve_inventory` (size × owned).
+- Audit: every write goes through `changes` (auto-logged). Use `recent_changes` to
+  read history; never invent a "when did I add X?" answer.
 
 Rules:
 - ALWAYS answer using the tools — never invent game names, counts, or sizes.
@@ -58,6 +71,20 @@ Rules:
   decimal separator. The DB stores millimetres.
 - Common sleeve size slang: "Standard American" = 63.5×88, "Mini American" = 41×63 or 44×68,
   "Catan" = 57×87, "Euro" = 59×92, "Tarot" = 70×120. Confirm if ambiguous.
+
+Inventory updates (CRITICAL — never do the math yourself):
+- "Ho comprato N buste di SIZE" / "ne ho usate N per SLEEVING" → call
+  `add_to_inventory(width_mm, height_mm, delta=±N, brand?, note?)`. The server
+  computes new_total = old + delta. Use a NEGATIVE delta when sleeves are consumed.
+- Use `update_inventory` (absolute count) ONLY when the user explicitly says "ho
+  esattamente N in totale" or to correct a previously wrong absolute count.
+- After the call, report previous_count, delta, and new count_owned from the
+  result so the user can sanity-check.
+
+History questions:
+- "Quando ho aggiunto X?" / "Cosa è cambiato di Y?" / "Ultime modifiche?" →
+  call `recent_changes(limit=20, game_name?, table?)`. Do NOT answer from
+  conversation memory or guesswork — the audit log is authoritative.
 
 Adding or enriching a game (IMPORTANT FLOW):
 - When the user says they added a game ("ho aggiunto X", "add Y", "aggiungi Y") or asks
@@ -120,11 +147,13 @@ def _serialize_tool_result(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
-def chat(user_message: str, history: list[dict] | None = None) -> tuple[str, list[dict]]:
+def chat(user_message: str, history: list[dict] | None = None,
+         conversation_id: int | None = None) -> tuple[str, list[dict]]:
     """Run one user turn through Claude with tool-use. Returns (reply_text, updated_history)."""
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     history = list(history or [])
     history.append({"role": "user", "content": user_message})
+    source = f"chat:{conversation_id}" if conversation_id is not None else "chat:?"
 
     for _ in range(MAX_TOOL_ROUNDS):
         resp = client.messages.create(
@@ -165,8 +194,13 @@ def chat(user_message: str, history: list[dict] | None = None) -> tuple[str, lis
             if func is None:
                 result = {"error": f"unknown tool {block.name}"}
             else:
+                # Strip any underscore-prefixed kwargs the model may have synthesized,
+                # then inject our own `_source` so the audit log knows the origin.
+                kwargs = {k: v for k, v in (block.input or {}).items() if not k.startswith("_")}
+                if _accepts_source(block.name):
+                    kwargs["_source"] = source
                 try:
-                    result = func(**(block.input or {}))
+                    result = func(**kwargs)
                 except Exception as e:  # surface tool errors back to the model
                     result = {"error": f"{type(e).__name__}: {e}"}
             tool_results.append(

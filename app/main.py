@@ -61,7 +61,7 @@ def chat_endpoint(req: ChatRequest) -> ChatResponse:
             raise HTTPException(404, f"conversation {conv_id} not found")
         history = loaded["history"]
 
-    reply, history = chat(req.message, history)
+    reply, history = chat(req.message, history, conversation_id=conv_id)
     conv.save_conversation(conv_id, history)
     return ChatResponse(reply=reply, history=history, conversation_id=conv_id)
 

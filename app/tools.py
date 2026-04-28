@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import audit
 from .db import get_conn
 
 DIM_TABLES = {  # bridge_table -> (dim_table, fk_col)
@@ -154,6 +155,7 @@ def add_game(
     publishers: list[str] | None = None,
     categories: list[str] | None = None,
     mechanics: list[str] | None = None,
+    _source: str | None = None,
 ) -> dict:
     """Insert a new game. Fails if name already exists. Lists upsert into dim tables."""
     with get_conn() as conn:
@@ -172,9 +174,17 @@ def add_game(
              thumbnail_url, image_url, language, condition, notes, sleeve_status or "unknown"),
         )
         gid = cur.lastrowid
+        bridge_added: dict[str, list[str]] = {}
         for bridge, (dim, fk) in DIM_TABLES.items():
             arg_name = bridge.replace("game_", "")
-            _set_bridges(conn, gid, bridge, dim, fk, locals().get(arg_name))
+            vals = locals().get(arg_name)
+            _set_bridges(conn, gid, bridge, dim, fk, vals)
+            if vals:
+                bridge_added[arg_name] = vals
+        snapshot = dict(conn.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone())
+        snapshot.update(bridge_added)  # include lists in the audit snapshot
+        audit.log_full(conn, table="games", row_id=gid, row_label=name,
+                       action="insert", snapshot=snapshot, source=_source)
         conn.commit()
     return {"ok": True, "id": gid, "name": name}
 
@@ -204,6 +214,7 @@ def update_game(
     publishers: list[str] | None = None,
     categories: list[str] | None = None,
     mechanics: list[str] | None = None,
+    _source: str | None = None,
 ) -> dict:
     """Patch fields on an existing game. Only non-null args are updated. Lists REPLACE bridges."""
     scalar_fields = {
@@ -222,6 +233,13 @@ def update_game(
         if not row:
             return {"error": f"Game {name!r} not found"}
         gid = row["id"]
+
+        # Snapshot BEFORE for audit (scalars + lists).
+        before = dict(conn.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone())
+        for bridge, (dim, fk) in DIM_TABLES.items():
+            arg_name = bridge.replace("game_", "")
+            before[arg_name] = _game_dims(conn, gid, bridge, dim, fk)
+
         if fields:
             fields["updated_at"] = "CURRENT_TIMESTAMP"  # placeholder — handled below
             sets = ", ".join(f"{k}=?" for k in fields if k != "updated_at") + ", updated_at=CURRENT_TIMESTAMP"
@@ -230,28 +248,48 @@ def update_game(
         for bridge, (dim, fk) in DIM_TABLES.items():
             arg_name = bridge.replace("game_", "")
             _set_bridges(conn, gid, bridge, dim, fk, locals().get(arg_name))
+
+        # Snapshot AFTER and diff.
+        after = dict(conn.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone())
+        for bridge, (dim, fk) in DIM_TABLES.items():
+            arg_name = bridge.replace("game_", "")
+            after[arg_name] = _game_dims(conn, gid, bridge, dim, fk)
+        n_logged = audit.log_diff(conn, table="games", row_id=gid, row_label=name,
+                                  before=before, after=after, source=_source)
         conn.commit()
-    return {"ok": True, "name": name, "updated_scalar": list(fields.keys())}
+    return {"ok": True, "name": name, "updated_scalar": list(fields.keys()), "audit_rows": n_logged}
 
 
-def delete_game(name: str) -> dict:
+def delete_game(name: str, _source: str | None = None) -> dict:
     """Remove a game (cascade deletes dim links + sleeve requirements)."""
     with get_conn() as conn:
-        row = conn.execute("SELECT id FROM games WHERE LOWER(name)=LOWER(?)", (name,)).fetchone()
+        row = conn.execute("SELECT * FROM games WHERE LOWER(name)=LOWER(?)", (name,)).fetchone()
         if not row:
             return {"error": f"Game {name!r} not found"}
-        conn.execute("DELETE FROM games WHERE id=?", (row["id"],))
+        gid = row["id"]
+        snapshot = dict(row)
+        for bridge, (dim, fk) in DIM_TABLES.items():
+            arg_name = bridge.replace("game_", "")
+            snapshot[arg_name] = _game_dims(conn, gid, bridge, dim, fk)
+        audit.log_full(conn, table="games", row_id=gid, row_label=name,
+                       action="delete", snapshot=snapshot, source=_source)
+        conn.execute("DELETE FROM games WHERE id=?", (gid,))
         conn.commit()
     return {"ok": True, "deleted": name}
 
 
-def set_sleeve_requirements(name: str, requirements: list[dict]) -> dict:
+def set_sleeve_requirements(name: str, requirements: list[dict],
+                            _source: str | None = None) -> dict:
     """Replace sleeve requirements for a game. Items: {count, width_mm, height_mm, note?}."""
     with get_conn() as conn:
         row = conn.execute("SELECT id FROM games WHERE LOWER(name)=LOWER(?)", (name,)).fetchone()
         if not row:
             return {"error": f"Game {name!r} not found"}
         gid = row["id"]
+        # Snapshot existing requirements as a sorted list of tuples for diff readability.
+        before_rows = [dict(r) for r in conn.execute(
+            "SELECT count, width_mm, height_mm, note FROM sleeve_requirements WHERE game_id=? ORDER BY width_mm, height_mm",
+            (gid,)).fetchall()]
         conn.execute("DELETE FROM sleeve_requirements WHERE game_id=?", (gid,))
         for r in requirements:
             try:
@@ -262,6 +300,10 @@ def set_sleeve_requirements(name: str, requirements: list[dict]) -> dict:
                 )
             except (KeyError, ValueError, TypeError) as e:
                 return {"error": f"bad requirement {r!r}: {e}"}
+        # Single audit row capturing the whole replacement (the granularity here is the game).
+        audit.log_change(conn, table="sleeve_requirements", row_id=gid, row_label=name,
+                         action="update", field="requirements",
+                         old=before_rows, new=requirements, source=_source)
         conn.commit()
     return {"ok": True, "name": name, "rows": len(requirements)}
 
@@ -300,17 +342,137 @@ def list_inventory() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def update_inventory(width_mm: float, height_mm: float, count_owned: int, brand: str | None = None) -> dict:
-    """Upsert a sleeve inventory row (sets absolute count, not delta)."""
+def update_inventory(width_mm: float, height_mm: float, count_owned: int,
+                     brand: str | None = None, _source: str | None = None) -> dict:
+    """Upsert a sleeve inventory row (sets ABSOLUTE count, not delta).
+
+    For "I just bought N more" use `add_to_inventory` instead — it does the
+    arithmetic server-side so the model can't get the addition wrong.
+    """
+    label = f"{width_mm}x{height_mm}" + (f"/{brand}" if brand else "")
     with get_conn() as conn:
+        before = conn.execute(
+            "SELECT id, count_owned FROM sleeve_inventory "
+            "WHERE width_mm=? AND height_mm=? AND brand IS ?",
+            (width_mm, height_mm, brand),
+        ).fetchone()
+        old_count = before["count_owned"] if before else None
         conn.execute(
             """INSERT INTO sleeve_inventory(width_mm, height_mm, count_owned, brand)
                VALUES(?,?,?,?)
                ON CONFLICT(width_mm, height_mm, brand) DO UPDATE SET count_owned=excluded.count_owned""",
             (width_mm, height_mm, count_owned, brand),
         )
+        row_id = conn.execute(
+            "SELECT id FROM sleeve_inventory WHERE width_mm=? AND height_mm=? AND brand IS ?",
+            (width_mm, height_mm, brand),
+        ).fetchone()["id"]
+        if before is None:
+            audit.log_full(conn, table="sleeve_inventory", row_id=row_id, row_label=label,
+                           action="insert",
+                           snapshot={"width_mm": width_mm, "height_mm": height_mm,
+                                     "count_owned": count_owned, "brand": brand},
+                           source=_source)
+        elif old_count != count_owned:
+            audit.log_change(conn, table="sleeve_inventory", row_id=row_id, row_label=label,
+                             action="update", field="count_owned",
+                             old=old_count, new=count_owned, source=_source)
         conn.commit()
-    return {"ok": True, "width_mm": width_mm, "height_mm": height_mm, "count_owned": count_owned, "brand": brand}
+    return {"ok": True, "width_mm": width_mm, "height_mm": height_mm,
+            "count_owned": count_owned, "brand": brand,
+            "previous_count": old_count}
+
+
+def add_to_inventory(width_mm: float, height_mm: float, delta: int,
+                     brand: str | None = None, note: str | None = None,
+                     _source: str | None = None) -> dict:
+    """Add (or subtract, with negative delta) sleeves from inventory by DELTA.
+
+    Server-side arithmetic so the model never has to compute new = old + bought.
+    Creates the row if missing (start = max(0, delta)). Refuses to go negative.
+    """
+    if not isinstance(delta, int) or delta == 0:
+        return {"error": "delta must be a non-zero integer"}
+    label = f"{width_mm}x{height_mm}" + (f"/{brand}" if brand else "")
+    with get_conn() as conn:
+        before = conn.execute(
+            "SELECT id, count_owned FROM sleeve_inventory "
+            "WHERE width_mm=? AND height_mm=? AND brand IS ?",
+            (width_mm, height_mm, brand),
+        ).fetchone()
+        old_count = before["count_owned"] if before else 0
+        new_count = old_count + delta
+        if new_count < 0:
+            return {"error": f"would go negative: current={old_count}, delta={delta}"}
+        if before is None:
+            conn.execute(
+                "INSERT INTO sleeve_inventory(width_mm, height_mm, count_owned, brand) VALUES(?,?,?,?)",
+                (width_mm, height_mm, new_count, brand),
+            )
+            row_id = conn.execute(
+                "SELECT id FROM sleeve_inventory WHERE width_mm=? AND height_mm=? AND brand IS ?",
+                (width_mm, height_mm, brand),
+            ).fetchone()["id"]
+            audit.log_full(conn, table="sleeve_inventory", row_id=row_id, row_label=label,
+                           action="insert",
+                           snapshot={"width_mm": width_mm, "height_mm": height_mm,
+                                     "count_owned": new_count, "brand": brand,
+                                     "_via": "add_to_inventory", "_delta": delta,
+                                     "_note": note},
+                           source=_source)
+        else:
+            row_id = before["id"]
+            conn.execute("UPDATE sleeve_inventory SET count_owned=? WHERE id=?",
+                         (new_count, row_id))
+            audit.log_change(conn, table="sleeve_inventory", row_id=row_id, row_label=label,
+                             action="update", field="count_owned",
+                             old=old_count, new=new_count,
+                             source=(f"{_source} delta={delta:+d}"
+                                     + (f" note={note!r}" if note else "")) if _source
+                                    else f"delta={delta:+d}")
+        conn.commit()
+    return {"ok": True, "width_mm": width_mm, "height_mm": height_mm,
+            "previous_count": old_count, "delta": delta, "count_owned": new_count,
+            "brand": brand}
+
+
+def recent_changes(limit: int = 20, table: str | None = None,
+                   game_name: str | None = None) -> list[dict]:
+    """Read the audit log: last N writes, optionally filtered by table or by game.
+
+    `game_name` filters changes affecting the named game (resolves to its id and
+    looks at table_name='games' rows for that id, plus sleeve_requirements rows
+    keyed by the same game_id).
+    """
+    with get_conn() as conn:
+        if game_name:
+            row = conn.execute("SELECT id, name FROM games WHERE LOWER(name)=LOWER(?)",
+                               (game_name,)).fetchone()
+            if not row:
+                return [{"error": f"Game {game_name!r} not found"}]
+            gid = row["id"]
+            rows = conn.execute(
+                """SELECT id, ts, table_name, row_id, row_label, action, field,
+                          old_value, new_value, source
+                   FROM changes
+                   WHERE (table_name='games' AND row_id=?)
+                      OR (table_name='sleeve_requirements' AND row_id=?)
+                   ORDER BY id DESC LIMIT ?""",
+                (gid, gid, limit),
+            ).fetchall()
+            import json as _json
+            out = []
+            for r in rows:
+                d = dict(r)
+                for k in ("old_value", "new_value"):
+                    if d[k] is not None:
+                        try:
+                            d[k] = _json.loads(d[k])
+                        except (_json.JSONDecodeError, TypeError):
+                            pass
+                out.append(d)
+            return out
+        return audit.recent(conn, limit=limit, table=table)
 
 
 def ingest_rulebook(game_name: str, pdf_path: str) -> dict:
@@ -492,6 +654,43 @@ TOOLS = [
         },
     },
     {
+        "name": "add_to_inventory",
+        "description": (
+            "Increment (or decrement, with negative delta) sleeve inventory by an "
+            "amount. PREFERRED for 'I just bought N more' / 'used N for sleeving X' "
+            "because the server does the arithmetic — never compute new_total = old + N "
+            "yourself. Refuses to go negative."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "width_mm":  {"type": "number"},
+                "height_mm": {"type": "number"},
+                "delta":     {"type": "integer", "description": "Positive to add, negative to remove."},
+                "brand":     {"type": "string"},
+                "note":      {"type": "string", "description": "Optional reason, e.g. 'bought at Asmodee', 'sleeved Wingspan'."},
+            },
+            "required": ["width_mm", "height_mm", "delta"],
+        },
+    },
+    {
+        "name": "recent_changes",
+        "description": (
+            "Read the audit log: who changed what and when. Use for questions like "
+            "'cosa è cambiato di Wingspan?', 'quando ho aggiunto Concordia?', "
+            "'mostrami le ultime modifiche'. Filter by `table` (games | sleeve_requirements | "
+            "sleeve_inventory) or by `game_name` to narrow down."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit":     {"type": "integer", "description": "Max rows (default 20)."},
+                "table":     {"type": "string", "enum": ["games", "sleeve_requirements", "sleeve_inventory"]},
+                "game_name": {"type": "string", "description": "Show only changes for this game."},
+            },
+        },
+    },
+    {
         "name": "ingest_rulebook",
         "description": (
             "Parse a rulebook PDF, chunk it, and index it for semantic search "
@@ -553,6 +752,8 @@ TOOL_FUNCS = {
     "sleeve_summary":          sleeve_summary,
     "list_inventory":          list_inventory,
     "update_inventory":        update_inventory,
+    "add_to_inventory":        add_to_inventory,
+    "recent_changes":          recent_changes,
     "list_dimension":          list_dimension,
     "ingest_rulebook":         ingest_rulebook,
     "ask_rules":               ask_rules,

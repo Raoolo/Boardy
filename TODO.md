@@ -14,11 +14,14 @@ For long-form rationale see `secondbrain/memo-boardy-future.md`.
 - [x] Rulebook RAG: pypdf parsing, local sentence-transformers embeddings, brute-force cosine search, page-cited answers.
 - [x] Drag-and-drop PDF upload with autocomplete game picker.
 - [x] BGG backfill script (`etl/backfill_bgg.py`) using Haiku 4.5.
+- [x] BGG backfill v2 via official XML API2 (`etl/bgg_api.py` + `etl/backfill_v2.py`). Awaits BGG token to run.
+- [x] Audit log `changes(...)` + integration in all write tools (memo §8). New tool `recent_changes` for the model.
+- [x] Delta-based inventory tool `add_to_inventory(width, height, delta, brand?)`.
 
 ## 🔴 High priority
 - [ ] **AI-ready: embeddings on `games.description`** for semantic search ("ho voglia di un gioco di esplorazione spaziale"). Reuse the rulebooks embedding pipeline; one pass when description is set/updated. (memo §8)
-- [ ] **Audit log** `changes(table, row_id, field, old, new, ts, source=conversation_id)`. Triggered from `app/tools.py` write paths. (memo §8)
 - [ ] **Frontend citation polish** — the `[↗](url)` suffix is ugly; convert text-block citations into superscript footnotes with a sources panel at the bottom of each bot bubble. Backend already passes citations in the `assistant.content[].citations` blocks; wire them in `web/index.html`.
+- [ ] **System prompt** — teach Claude to prefer `add_to_inventory` (delta) over `update_inventory` (absolute) for purchases, and to call `recent_changes` for "quando/cosa è cambiato" questions.
 
 ## 🟡 Medium priority
 - [ ] **Inventory editing UI** (forms, not chat). Bulk-update sleeve stock after a shopping run. (memo §7)

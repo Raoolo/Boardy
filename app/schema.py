@@ -162,6 +162,23 @@ CREATE TABLE IF NOT EXISTS rulebook_chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_rulebook ON rulebook_chunks(rulebook_id);
 """
 
+CHANGES_DDL = """
+CREATE TABLE IF NOT EXISTS changes (
+  id INTEGER PRIMARY KEY,
+  ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  table_name TEXT NOT NULL,        -- 'games' | 'sleeve_requirements' | 'sleeve_inventory'
+  row_id INTEGER,                   -- PK of the affected row (NULL allowed for cascades)
+  row_label TEXT,                   -- human-readable handle (game name, "70x110/Mayday", ...)
+  action TEXT NOT NULL,             -- 'insert' | 'update' | 'delete'
+  field TEXT,                       -- column name; NULL for insert/delete (whole-row events)
+  old_value TEXT,                   -- JSON-encoded
+  new_value TEXT,                   -- JSON-encoded
+  source TEXT NOT NULL DEFAULT 'unknown'  -- 'chat:{conv_id}' | 'etl' | 'backfill_v2' | 'manual'
+);
+CREATE INDEX IF NOT EXISTS idx_changes_table_row ON changes(table_name, row_id);
+CREATE INDEX IF NOT EXISTS idx_changes_ts ON changes(ts DESC);
+"""
+
 
 def migrate() -> None:
     with get_conn() as conn:
@@ -179,5 +196,8 @@ def migrate() -> None:
 
         # Rulebook tables (Step 2: RAG)
         conn.executescript(RULEBOOKS_DDL)
+
+        # Audit log (Step 3: history of writes)
+        conn.executescript(CHANGES_DDL)
 
         conn.commit()
