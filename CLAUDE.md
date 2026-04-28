@@ -25,9 +25,13 @@ uv run python etl/import_excel.py
 # Run the web app (localhost:8765)
 uv run uvicorn app.main:app --port 8765
 
-# Backfill BGG metadata for all games missing bgg_id (Haiku 4.5, ~$0.03/game)
-uv run python etl/backfill_bgg.py --auto
-uv run python etl/backfill_bgg.py --only "Wingspan"   # one game
+# Backfill BGG metadata via official XML API2 (deterministic, free, requires BGG_API_TOKEN)
+uv run python etl/backfill_v2.py phase1                # fill missing fields for games with bgg_id
+uv run python etl/backfill_v2.py phase2 [--auto]       # search BGG for games without bgg_id
+uv run python etl/backfill_v2.py apply --gid N --bgg X # manual id pick after phase2
+
+# Legacy (deprecated, expensive): Haiku + web_search backfill — kept for reference only.
+# uv run python etl/backfill_bgg.py --auto
 
 # Smoke-test a tool function without going through chat
 uv run python -c "from app.tools import sleeve_summary; print(sleeve_summary())"
@@ -61,6 +65,7 @@ sleeve_inventory   (FACT, granularity = sleeve size)
 
 rulebooks            ── rulebook_chunks (text + float32 embedding BLOB)
 conversations        — chat history JSON, server-side persistence
+changes              — audit log of every write (table, row_id, field, old/new, source, ts)
 ```
 
 `app/schema.py` runs an idempotent **migration on every server boot**: detects the v1 flat schema (column `producer` exists in `games`) and rewrites it to the v2 star schema, splitting CSV producer/publisher into bridge rows. Subsequent runs are no-ops.
@@ -79,13 +84,23 @@ conversations        — chat history JSON, server-side persistence
 
 ### Tools (`app/tools.py`)
 
-Read-only: `list_games` (filterable by name/players/complexity/sleeve_status/designer/publisher/category/mechanic), `get_game`, `sleeve_summary`, `list_inventory`, `list_dimension`, `list_rulebooks`.
+Read-only: `list_games` (filterable by name/players/complexity/sleeve_status/designer/publisher/category/mechanic), `get_game`, `sleeve_summary`, `list_inventory`, `list_dimension`, `list_rulebooks`, `recent_changes`.
 
-Write: `add_game`, `update_game`, `delete_game`, `set_sleeve_requirements`, `update_inventory`, `ingest_rulebook`.
+Write: `add_game`, `update_game`, `delete_game`, `set_sleeve_requirements`, `update_inventory`, `add_to_inventory` (delta), `ingest_rulebook`.
 
 RAG: `ask_rules` returns the top-k chunks; the calling Claude synthesizes the final answer and cites pages.
 
 `add_game` / `update_game` accept arrays for `designers`, `publishers`, `categories`, `mechanics` — `_set_bridges()` upserts the dim row and replaces the bridge rows in one go.
+
+`add_to_inventory(width, height, delta, brand?, note?)` is the **preferred** way to record purchases / consumption — server-side arithmetic so the model can't get `new = old + bought` wrong, and refuses negative results. `update_inventory` (absolute count) stays for explicit recounts.
+
+### Audit log (`app/audit.py`, `changes` table)
+
+Every write to `games`, `sleeve_requirements`, `sleeve_inventory` produces audit rows via `audit.log_change` / `log_diff` / `log_full`. Helpers run inside the caller's existing `sqlite3.Connection` so audit rows share the transaction with the mutation — failed UPDATE rolls back its own log row.
+
+`source` field convention: `chat:{conversation_id}` (auto-injected by `app/chat.py` via `inspect.signature` — kwarg `_source` is **not** declared in the JSON tool schema so the model can't spoof it), `backfill_v2`, `manual`, `unknown`. `import_excel.py` intentionally bypasses the log because it's a destructive bulk reset.
+
+`updated_at` and `created_at` are explicitly excluded from diffs (`audit._IGNORED_FIELDS`) to avoid noisy timestamp-only rows.
 
 ### Rulebook RAG (`app/rulebooks.py`)
 
@@ -119,10 +134,14 @@ Drag-and-drop: dragging a PDF anywhere on the page opens a modal with autocomple
 - **Windows console encoding is cp1252.** Any script printing `→`, `✓`, `↗`, etc. must `sys.stdout.reconfigure(encoding="utf-8")` early or run with `PYTHONIOENCODING=utf-8`. See `etl/backfill_bgg.py`.
 - **Embedding model first run downloads ~1GB** to `~/.cache/huggingface/`. Subsequent loads are ~3s.
 - **API keys**: the user's `ANTHROPIC_API_KEY` (in `.env`) works for all models — it's a single Anthropic Console key, separate from claude.ai Pro. Pro does NOT include API access.
+- **BGG XML API is paywalled** since 2026-04 — both v1 (`xmlapi/...`) and v2 (`xmlapi2/...`) require a bearer token (Cloudflare-gated). Register at `boardgamegeek.com/using_the_xml_api`, set `BGG_API_TOKEN=...` in `.env`. Without it, `etl/backfill_v2.py` errors with an explicit message; the public webpage scrape via `web_search` was tried in v1 and failed (JS-rendered widgets — see LEARNINGS).
+- **Audit kwarg `_source` is internal.** Write tools accept it but it must not appear in the JSON schemas inside `TOOLS` — `app/chat.py` injects it via introspection so the model never sees or sets it. If you add a new write tool, declare `_source: str | None = None` and let chat.py handle propagation.
 
 ## Files you'll touch most
 
-- `app/tools.py` — adding a tool means: function + JSON schema in `TOOLS` + entry in `TOOL_FUNCS`. The model picks them up on next chat call (no server restart needed if just editing function bodies; restart for new TOOLS schemas).
+- `app/tools.py` — adding a tool means: function + JSON schema in `TOOLS` + entry in `TOOL_FUNCS`. The model picks them up on next chat call (no server restart needed if just editing function bodies; restart for new TOOLS schemas). Write tools should accept `_source: str | None = None` so the audit log learns the origin automatically.
 - `app/chat.py:SYSTEM_PROMPT` — the model's behavioral spec. Keep it tight and explicit; Sonnet drifts on subtle rules.
 - `app/schema.py` — DDL for the star schema. Add new tables here, with `CREATE TABLE IF NOT EXISTS` so `migrate()` stays idempotent.
+- `app/audit.py` — audit-log helpers. Touch when changing what we log (e.g. adding a new ignored field) or when wiring a new write path.
+- `etl/bgg_api.py` — BGG XML API2 client. Touch when BGG adds new fields we want to capture or when changing the cache strategy.
 - `web/index.html` — single-file UI. CSS + JS inline. No build step.

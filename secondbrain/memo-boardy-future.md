@@ -1,8 +1,27 @@
 # Boardy — Future Improvements Memo
 
-Last updated: 2026-04-27
+Last updated: 2026-04-28
 
 This file captures ideas you've shared that are out of scope for the current build but worth coming back to. When you ask "how can I improve Boardy?", start here.
+
+---
+
+## Status snapshot (2026-04-28)
+
+- ✅ §4 "Auto-fill missing fields" — shipped via `etl/backfill_bgg.py` (Haiku) and
+  then rebuilt as `etl/bgg_api.py` + `etl/backfill_v2.py` (deterministic XML
+  API2). Awaiting BGG bearer token (paywalled since 2026-04). See §6 below for
+  the post-mortem on why v1 was replaced.
+- ✅ §5 "Rulebook RAG" — shipped (`app/rulebooks.py`, `ingest_rulebook` /
+  `ask_rules` tools, drag-and-drop in the UI).
+- ✅ §6 "Massive backfill" — shipped twice; v1 cost ~€3 with partial results
+  (JS-rendered BGG widgets + ambiguous-edition bailouts), v2 is the proper fix.
+- ✅ §8 "Audit log" — shipped (`app/audit.py`, `changes` table, all writes
+  auto-logged with `source` propagated from `chat:{conversation_id}` /
+  `backfill_v2` / etc.). New tools `add_to_inventory` (delta-based) and
+  `recent_changes` (read the log) are wired into the chat.
+- 🟡 §8 "Embeddings on description" — still open, top of TODO.
+- 🟡 §1 "Self-host LLM" — long-term aspiration, not on the immediate roadmap.
 
 ---
 
@@ -71,15 +90,42 @@ If browser STT quality disappoints in Italian: Whisper.cpp local server, or Open
 
 **Why local + cited:** during a real game, hallucinated rules are worse than no answer. Strict RAG with page citations keeps Boardy honest.
 
-## 6. Massive backfill of existing 56 games
+## 6. Massive backfill of existing 56 games  ✅ (rebuilt 2026-04-28)
 
 **Goal:** the 56 games imported from Excel only have name/players/duration/complexity/sleeve. After the v2 schema refactor (2026-04-27) every game can hold `bgg_id`, `year_published`, `bgg_rating`, `complexity_weight` (numeric), `description`, `thumbnail_url`, plus categories/mechanics. To make them queryable the way Boardy can query newly-added games, we need to enrich them all.
 
-**Approach:**
-- Add a script `etl/backfill_bgg.py` that iterates over `games WHERE bgg_id IS NULL`, calls Anthropic web_search for each ("<name> boardgame BGG"), parses the proposed metadata, and applies it via `update_game` — with a confirmation prompt per game (or `--auto` flag for batch mode).
-- Cost estimate: ~56 games × ~1 web_search each = ~$0.56 in search fees + ~56 × small LLM call = a few cents. Cheap.
-- Risk: ambiguous names ("7 Wonders I" → which BGG entry? Probably 68448 base game). Show user the candidate before writing; auto-confirm only when the BGG result name match is exact (case-insensitive).
-- Could also be triggered conversationally: user says "arricchisci tutti i giochi che non hanno BGG ID" → Boardy iterates with the existing tools.
+**v1 — what we tried first (2026-04-27, abandoned):**
+- `etl/backfill_bgg.py` running Haiku 4.5 + `web_search_20250305` per game.
+- Cost: ~€3 for 56 games. Result: 20 games still without `bgg_id` (16 marked
+  "ambiguous BGG match"), 27 games with `bgg_id` but missing
+  `complexity_weight`/`bgg_rating`/categories/mechanics.
+- Two structural failures: (a) BGG pages render those widgets via JavaScript,
+  so `web_search` reads HTML that literally doesn't contain the values;
+  (b) every "ambiguous edition" bailout still cost a search round.
+
+**v2 — the proper fix (2026-04-28, awaits BGG token):**
+- Skip the LLM entirely. Use BGG XML API2 directly:
+  `xmlapi2/thing?id=X&stats=1` (full structured metadata) and
+  `xmlapi2/search?query=NAME` (candidate list with id/year/type).
+- BGG paywalled the API behind Cloudflare in early 2026 — anonymous → HTTP 401.
+  Register an app at `boardgamegeek.com/using_the_xml_api`, put bearer token
+  in `.env` as `BGG_API_TOKEN`. Then deterministic, free in perpetuity.
+- Three phases (`etl/backfill_v2.py`):
+  1. *Phase 1*: every game with known `bgg_id` → fetch + patch missing fields.
+  2. *Phase 2*: every game without `bgg_id` → search → list candidates →
+     human picks via `apply --gid N --bgg X`. Optional `--auto` for
+     single-result hits.
+  3. *Phase 3*: residue (homebrews, regional) stays manual.
+- Code split: `etl/bgg_api.py` is pure HTTP+XML parsing (testable from saved
+  fixtures), `etl/backfill_v2.py` is the orchestrator that talks to
+  `app.tools.update_game`. On-disk cache at `etl/.bgg_cache/`.
+
+**What v1 left in the DB (still useful):**
+- The 27 games with a `bgg_id` populated (even if other fields are NULL) save
+  Phase 2 work — Phase 1 picks them up directly.
+- Ambiguous-match notes were cleaned out of `games.notes` on 2026-04-28
+  because they were noisy and the candidate IDs they mentioned will be
+  re-discovered deterministically by the v2 search.
 
 ## 7. Inventory & data improvements
 
@@ -87,14 +133,18 @@ If browser STT quality disappoints in Italian: Whisper.cpp local server, or Open
 - Re-import flow: instead of `DROP TABLE`, do an UPSERT merge so manually entered inventory survives an Excel re-import.
 - Normalize `63x88` vs `63.5x88` in the data — currently treated as different sizes (round-up rule, or a "size aliases" table).
 - Estimate sleeves for the 22 games marked `Sleeved` with no per-size breakdown — would let Boardy answer "how many sleeves does my collection have in total".
-- Hook into BoardGameGeek API to auto-fill missing metadata by game name.
+- ~~Hook into BoardGameGeek API to auto-fill missing metadata by game name.~~ ✅ via `etl/backfill_v2.py`.
+- ✅ Delta-based purchase recording: tool `add_to_inventory(width, height, delta, brand?, note?)` does the arithmetic server-side so the model can't get `new = old + bought` wrong, and refuses negative results. Replaces the older "model-computed absolute count" pattern.
 
 ## 8. Make the DB fully AI-ready
 
 The v2 schema is structured and tool-queryable but not "fully AI-ready" in the RAG sense. Two additions would close the gap:
 
-- **Embeddings on `games.description`** — column `description_embedding BLOB`, indexed once when description is set/updated. Enables semantic search like "ho voglia di un gioco di esplorazione spaziale" without keyword matches. Same infra as the rulebook RAG (§5), so do them together.
-- **Audit log table** `changes(id, table_name, row_id, field, old_value, new_value, changed_at, source)` — captures who/when/what for each write. Source = chat conversation_id when the write came from Boardy. Useful if multi-user or for "what did Boardy change last week?". Implement via SQL triggers or a thin write-wrapper in `app/tools.py`.
+- **Embeddings on `games.description`** 🟡 *open* — column `description_embedding BLOB`, indexed once when description is set/updated. Enables semantic search like "ho voglia di un gioco di esplorazione spaziale" without keyword matches. Same infra as the rulebook RAG (§5), so do them together. Now that v2 backfill will populate `description` consistently, this is the obvious next step.
+- **Audit log table** ✅ shipped 2026-04-28 — `changes(id, ts, table_name, row_id, row_label, action, field, old_value, new_value, source)` with indices on `(table_name, row_id)` and `ts DESC`. Implementation in `app/audit.py` using a thin wrapper approach (not SQL triggers — keeps the logic in Python where the source can be injected via `app/chat.py` introspection without showing up in the JSON tool schema).
+  - Source values in use: `chat:{conversation_id}` (auto), `backfill_v2`, `manual`, `unknown`. ETL writes (`import_excel.py`) intentionally bypass the log because that script is destructive bulk-reset by design.
+  - Read access: tool `recent_changes(limit, table?, game_name?)` — Sonnet now consults this for "quando ho aggiunto X?" / "cosa è cambiato di Y?" instead of guessing.
+  - Future polish: a `/changes` page in the UI for browsing without going through chat (low priority — SQL ad-hoc works for now).
 
 ## 9. Quality-of-life
 
