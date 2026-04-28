@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<title>Boardy — Libreria</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115; --fg: #e6e7eb; --muted: #8a8f99;
+    --accent: #5fb878; --accent-dim: #3a7c4f;
+    --border: #222831; --field: #181b22; --field-edge: #2a2f3a;
+    --row-hover: #1a1e27; --row-alt: #13161c;
+    --pill: #232936; --pill-fg: #b9c0cc;
+    --w1: #4ade80; --w2: #a3e635; --w3: #facc15; --w4: #fb923c; --w5: #f87171;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    padding: 14px 24px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h1 .accent { color: var(--accent); }
+  header .spacer { flex: 1; }
+  header a {
+    color: var(--muted); text-decoration: none; font-size: 13px;
+    border: 1px solid var(--field-edge); padding: 6px 12px; border-radius: 8px;
+  }
+  header a:hover { color: var(--accent); border-color: var(--accent); }
+  #count { color: var(--muted); font-size: 13px; }
+
+  /* Filter bar */
+  .filters {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    padding: 14px 24px; border-bottom: 1px solid var(--border);
+    background: #11141a;
+  }
+  .filters input, .filters select {
+    background: var(--field); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 8px;
+    padding: 8px 12px; font-size: 13px; font-family: inherit;
+    min-width: 140px;
+  }
+  .filters input:focus, .filters select:focus {
+    outline: none; border-color: var(--accent);
+  }
+  .filters input[type=text] { min-width: 220px; flex: 1; max-width: 360px; }
+  .filters .reset {
+    background: transparent; color: var(--muted); border: 1px solid var(--field-edge);
+    padding: 8px 14px; border-radius: 8px; font-size: 13px; cursor: pointer;
+    font-family: inherit;
+  }
+  .filters .reset:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* Table */
+  .wrap { padding: 18px 24px 40px; overflow-x: auto; }
+  table {
+    width: 100%; border-collapse: separate; border-spacing: 0;
+    font-size: 13.5px; min-width: 920px;
+  }
+  th, td {
+    padding: 10px 12px; text-align: left; vertical-align: top;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: #161922; color: var(--muted); font-weight: 600;
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px;
+    cursor: pointer; user-select: none;
+    position: sticky; top: 0; z-index: 1;
+  }
+  th:hover { color: var(--accent); }
+  th .arrow { font-size: 10px; color: var(--accent); margin-left: 4px; }
+  tbody tr:nth-child(even) { background: var(--row-alt); }
+  tbody tr:hover { background: var(--row-hover); }
+  td.name { font-weight: 600; color: var(--fg); }
+  td.name a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--accent-dim); }
+  td.name a:hover { color: var(--accent); }
+  td .year { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+  td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  td.muted { color: var(--muted); font-style: italic; font-size: 12px; }
+
+  /* Complexity pill — color-coded by weight tier */
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 600; white-space: nowrap;
+  }
+  .pill.w1 { background: rgba(74,222,128,0.15); color: var(--w1); }
+  .pill.w2 { background: rgba(163,230,53,0.15); color: var(--w2); }
+  .pill.w3 { background: rgba(250,204,21,0.15); color: var(--w3); }
+  .pill.w4 { background: rgba(251,146,60,0.15); color: var(--w4); }
+  .pill.w5 { background: rgba(248,113,113,0.15); color: var(--w5); }
+
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; max-width: 280px; }
+  .tag {
+    background: var(--pill); color: var(--pill-fg);
+    padding: 2px 8px; border-radius: 6px; font-size: 11.5px;
+  }
+  .empty {
+    padding: 80px 24px; text-align: center; color: var(--muted);
+  }
+  .rating { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bo<span class="accent">ardy</span> · Libreria</h1>
+  <span id="count"></span>
+  <span class="spacer"></span>
+  <a href="/">← Chat</a>
+</header>
+
+<div class="filters">
+  <input type="text" id="q" placeholder="🔎 Cerca per nome…" />
+  <select id="players">
+    <option value="">Giocatori (qualsiasi)</option>
+    <option value="1">1 giocatore</option>
+    <option value="2">2 giocatori</option>
+    <option value="3">3 giocatori</option>
+    <option value="4">4 giocatori</option>
+    <option value="5">5 giocatori</option>
+    <option value="6">6+ giocatori</option>
+  </select>
+  <select id="complexity">
+    <option value="">Complessità (qualsiasi)</option>
+    <option value="1">1 · Molto Semplice</option>
+    <option value="2">2 · Semplice</option>
+    <option value="3">3 · Medio</option>
+    <option value="4">4 · Complesso</option>
+    <option value="5">5 · Esperto</option>
+  </select>
+  <select id="category"><option value="">Categoria (qualsiasi)</option></select>
+  <select id="mechanic"><option value="">Meccanica (qualsiasi)</option></select>
+  <button class="reset" id="reset">Azzera</button>
+</div>
+
+<div class="wrap">
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th data-sort="name">Nome</th>
+        <th data-sort="year" class="num">Anno</th>
+        <th data-sort="players">Giocatori</th>
+        <th data-sort="duration" class="num">Durata</th>
+        <th data-sort="weight">Complessità</th>
+        <th data-sort="rating" class="num">BGG</th>
+        <th>Categorie</th>
+        <th>Meccaniche</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" class="empty" style="display:none">Nessun gioco trovato con questi filtri.</div>
+</div>
+
+<script>
+const state = {
+  games: [],
+  filtered: [],
+  sortKey: "name",
+  sortDir: 1, // 1 asc, -1 desc
+};
+
+// Map BGG weight → complexity tier (matches the system prompt mapping).
+function weightTier(w) {
+  if (w == null) return null;
+  if (w < 2.0)  return 1;
+  if (w < 2.5)  return 2;
+  if (w < 3.5)  return 3;
+  if (w < 4.2)  return 4;
+  return 5;
+}
+
+function fmtPlayers(g) {
+  if (g.players_min == null && g.players_max == null) return "—";
+  const range = g.players_min === g.players_max
+    ? `${g.players_min}` : `${g.players_min}–${g.players_max}`;
+  return g.players_best ? `${range} <span class="year">(★ ${g.players_best})</span>` : range;
+}
+
+function fmtDuration(g) {
+  if (g.duration_min_min && g.duration_max_min && g.duration_min_min !== g.duration_max_min) {
+    return `${g.duration_min_min}–${g.duration_max_min}'`;
+  }
+  if (g.duration_min) return `${g.duration_min}'`;
+  return "—";
+}
+
+function fmtComplexity(g) {
+  const tier = weightTier(g.complexity_weight);
+  if (!tier) return `<span class="muted">—</span>`;
+  const label = (g.complexity_label || "").replace(/^\d+\.\s*/, "");
+  return `<span class="pill w${tier}">${label || "?"}${g.complexity_weight ? ` · ${g.complexity_weight.toFixed(1)}` : ""}</span>`;
+}
+
+function fmtRating(g) {
+  if (!g.bgg_rating) return `<span class="muted">—</span>`;
+  return `<span class="rating">${g.bgg_rating.toFixed(1)}</span>`;
+}
+
+function fmtTags(arr) {
+  if (!arr || !arr.length) return `<span class="muted">—</span>`;
+  return `<div class="tags">${arr.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function nameCell(g) {
+  const year = g.year_published ? `<span class="year">(${g.year_published})</span>` : "";
+  if (g.bgg_id) {
+    return `<a href="https://boardgamegeek.com/boardgame/${g.bgg_id}" target="_blank" rel="noopener">${escapeHtml(g.name)}</a> ${year}`;
+  }
+  return `${escapeHtml(g.name)} ${year}`;
+}
+
+function sortKeyValue(g, key) {
+  switch (key) {
+    case "name":     return (g.name || "").toLowerCase();
+    case "year":     return g.year_published ?? -1;
+    case "players":  return g.players_max ?? 0;
+    case "duration": return g.duration_max_min ?? g.duration_min ?? 0;
+    case "weight":   return g.complexity_weight ?? 0;
+    case "rating":   return g.bgg_rating ?? 0;
+    default:         return 0;
+  }
+}
+
+function applyFilters() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const players = document.getElementById("players").value;
+  const complexity = document.getElementById("complexity").value;
+  const category = document.getElementById("category").value;
+  const mechanic = document.getElementById("mechanic").value;
+
+  state.filtered = state.games.filter(g => {
+    if (q && !(g.name || "").toLowerCase().includes(q)) return false;
+    if (players) {
+      const p = parseInt(players, 10);
+      const min = g.players_min, max = g.players_max;
+      if (min == null || max == null) return false;
+      if (players === "6") { if (max < 6) return false; }
+      else if (p < min || p > max) return false;
+    }
+    if (complexity) {
+      const tier = weightTier(g.complexity_weight);
+      if (tier !== parseInt(complexity, 10)) return false;
+    }
+    if (category && !(g.categories || []).includes(category)) return false;
+    if (mechanic && !(g.mechanics || []).includes(mechanic)) return false;
+    return true;
+  });
+
+  state.filtered.sort((a, b) => {
+    const va = sortKeyValue(a, state.sortKey);
+    const vb = sortKeyValue(b, state.sortKey);
+    if (va < vb) return -1 * state.sortDir;
+    if (va > vb) return  1 * state.sortDir;
+    return 0;
+  });
+
+  render();
+}
+
+function render() {
+  const tbody = document.getElementById("rows");
+  document.getElementById("count").textContent =
+    `${state.filtered.length} / ${state.games.length} giochi`;
+
+  if (!state.filtered.length) {
+    tbody.innerHTML = "";
+    document.getElementById("empty").style.display = "block";
+  } else {
+    document.getElementById("empty").style.display = "none";
+    tbody.innerHTML = state.filtered.map(g => `
+      <tr>
+        <td class="name">${nameCell(g)}</td>
+        <td class="num muted">${g.year_published ?? "—"}</td>
+        <td class="num">${fmtPlayers(g)}</td>
+        <td class="num">${fmtDuration(g)}</td>
+        <td>${fmtComplexity(g)}</td>
+        <td class="num">${fmtRating(g)}</td>
+        <td>${fmtTags(g.categories)}</td>
+        <td>${fmtTags(g.mechanics)}</td>
+      </tr>
+    `).join("");
+  }
+
+  // Update sort arrow
+  document.querySelectorAll("th[data-sort]").forEach(th => {
+    const arrow = th.querySelector(".arrow");
+    if (arrow) arrow.remove();
+    if (th.dataset.sort === state.sortKey) {
+      const span = document.createElement("span");
+      span.className = "arrow";
+      span.textContent = state.sortDir === 1 ? "▲" : "▼";
+      th.appendChild(span);
+    }
+  });
+}
+
+async function load() {
+  const r = await fetch("/library/data");
+  const data = await r.json();
+  state.games = data.games;
+
+  const catSel = document.getElementById("category");
+  data.categories.forEach(c => {
+    const o = document.createElement("option"); o.value = c; o.textContent = c; catSel.appendChild(o);
+  });
+  const mechSel = document.getElementById("mechanic");
+  data.mechanics.forEach(m => {
+    const o = document.createElement("option"); o.value = m; o.textContent = m; mechSel.appendChild(o);
+  });
+
+  applyFilters();
+}
+
+// Wire up filter inputs
+["q", "players", "complexity", "category", "mechanic"].forEach(id => {
+  document.getElementById(id).addEventListener("input", applyFilters);
+});
+document.getElementById("reset").addEventListener("click", () => {
+  ["q", "players", "complexity", "category", "mechanic"].forEach(id => {
+    document.getElementById(id).value = "";
+  });
+  applyFilters();
+});
+
+// Sort headers
+document.querySelectorAll("th[data-sort]").forEach(th => {
+  th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    if (state.sortKey === k) state.sortDir *= -1;
+    else { state.sortKey = k; state.sortDir = 1; }
+    applyFilters();
+  });
+});
+
+load();
+</script>
+</body>
+</html>

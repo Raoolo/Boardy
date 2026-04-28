@@ -23,6 +23,7 @@ conv.migrate()
 
 ROOT = Path(__file__).resolve().parent.parent
 INDEX = ROOT / "web" / "index.html"
+LIBRARY = ROOT / "web" / "library.html"
 RULEBOOKS_DIR = ROOT / "rulebooks"
 RULEBOOKS_DIR.mkdir(exist_ok=True)
 
@@ -90,6 +91,38 @@ def games_names() -> list[str]:
     """Names only — for autocomplete dropdowns in the UI."""
     with get_conn() as c:
         return [r["name"] for r in c.execute("SELECT name FROM games ORDER BY name")]
+
+
+@app.get("/library")
+def library_page() -> FileResponse:
+    return FileResponse(LIBRARY)
+
+
+@app.get("/library/data")
+def library_data() -> dict:
+    """All games with their dim arrays + the universe of categories/mechanics for filter dropdowns."""
+    with get_conn() as c:
+        games = []
+        rows = c.execute("""
+            SELECT id, name, bgg_id, year_published,
+                   players_min, players_max, players_best,
+                   duration_min, duration_min_min, duration_max_min,
+                   complexity_label, complexity_weight, bgg_rating,
+                   thumbnail_url, sleeve_status
+            FROM games ORDER BY name
+        """).fetchall()
+        for r in rows:
+            gid = r["id"]
+            cats = [x["name"] for x in c.execute(
+                "SELECT d.name FROM categories d JOIN game_categories b ON b.category_id=d.id WHERE b.game_id=? ORDER BY d.name",
+                (gid,)).fetchall()]
+            mechs = [x["name"] for x in c.execute(
+                "SELECT d.name FROM mechanics d JOIN game_mechanics b ON b.mechanic_id=d.id WHERE b.game_id=? ORDER BY d.name",
+                (gid,)).fetchall()]
+            games.append({**dict(r), "categories": cats, "mechanics": mechs})
+        all_categories = [r["name"] for r in c.execute("SELECT name FROM categories ORDER BY name")]
+        all_mechanics  = [r["name"] for r in c.execute("SELECT name FROM mechanics ORDER BY name")]
+    return {"games": games, "categories": all_categories, "mechanics": all_mechanics}
 
 
 @app.post("/rulebooks/upload")
