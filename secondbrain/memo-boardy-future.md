@@ -1,12 +1,12 @@
 # Boardy — Future Improvements Memo
 
-Last updated: 2026-04-28
+Last updated: 2026-04-29
 
 This file captures ideas you've shared that are out of scope for the current build but worth coming back to. When you ask "how can I improve Boardy?", start here.
 
 ---
 
-## Status snapshot (2026-04-28)
+## Status snapshot (2026-04-29)
 
 - ✅ §4 "Auto-fill missing fields" — shipped via `etl/backfill_bgg.py` (Haiku) and
   then rebuilt as `etl/bgg_api.py` + `etl/backfill_v2.py` (deterministic XML
@@ -20,12 +20,15 @@ This file captures ideas you've shared that are out of scope for the current bui
   auto-logged with `source` propagated from `chat:{conversation_id}` /
   `backfill_v2` / etc.). New tools `add_to_inventory` (delta-based) and
   `recent_changes` (read the log) are wired into the chat.
-- 🟡 §8 "Embeddings on description" — still open, top of TODO.
-- 🟡 §1 "Self-host LLM" — long-term aspiration, not on the immediate roadmap.
+- 🟡 §1 "Self-host LLM" — **half-shipped 2026-04-29**: provider abstraction
+  in `app/llm.py`, working OllamaProvider with `boardy-qwen` Modelfile
+  (Qwen2.5 7B, num_ctx 8192). Two open issues block production switch —
+  CPU-only inference is slow, 7B output quality drifts. See §1 below.
+- 🟡 §8 "Embeddings on description" — still open, second on the High-priority TODO.
 
 ---
 
-## 1. Replace Claude API with a self-hosted free LLM
+## 1. Replace Claude API with a self-hosted free LLM  🟡 *in progress (2026-04-29)*
 
 **Goal you stated:** stop paying per-token, eventually run "on an Arduino" so Boardy is a fully offline, self-contained appliance.
 
@@ -38,10 +41,61 @@ This file captures ideas you've shared that are out of scope for the current bui
   - Mac Mini M4 — overkill but trivially fast for 8B–14B models, low idle power.
 - For now: run on the laptop you already have. Arduino-class hardware is a separate project.
 
-**Migration path (when ready):**
-1. Install Ollama locally (`ollama pull qwen2.5:7b-instruct` or `llama3.1:8b-instruct`).
-2. Replace the `Anthropic` client in `app/chat.py` with the OpenAI-compatible Ollama endpoint (`http://localhost:11434/v1`). The `anthropic` SDK isn't needed; tools still work via the OpenAI tool-calling spec — but tool-use quality on 7–8B models is **noticeably worse** than Claude. Test sleeve_summary specifically.
-3. If tool-use quality drags, fall back to a **prompt-only** mode: stuff the entire DB (≤56 games, fits easily) into the system prompt as a JSON blob, no tools. Loses `update_inventory`, gains reliability.
+**Status (2026-04-29):**
+The infra side is **done**. `app/llm.py` exposes a clean `Provider` interface
+with `AnthropicProvider` (default) and `OllamaProvider` (Ollama at
+`http://localhost:11434/v1`). Schema translation between Anthropic's
+`input_schema` shape and OpenAI's `function.parameters` is a one-liner
+inside the provider. Conversations recorded under one provider keep working
+when you switch to the other — `_history_to_openai` translates Anthropic
+content blocks on the fly. Switch with `LLM_PROVIDER=ollama` in `.env`.
+
+**Two issues block making Ollama the default:**
+
+1. **CPU-only inference.** Hardware: Ryzen AI 7 PRO 350 + Radeon 860M iGPU,
+   32 GB RAM. Ollama loads the model at "100% CPU" — the iGPU (RDNA 3.5)
+   isn't being engaged automatically. AMD APU support on Windows is patchy
+   in Ollama 2026; Vulkan backend or `OLLAMA_NUM_GPU` may help. NPU on the
+   350 is not yet supported by Ollama. Worst-case acceptable: live with the
+   CPU latency for personal use; first turn ~60s, subsequent ~15-30s.
+
+2. **Quality drift on 7B.** Tested with `boardy-qwen` (derived from
+   `qwen2.5:7b-instruct` with `num_ctx=8192`, `temperature=0.3` via Modelfile).
+   In a focused tool-routing benchmark (`test_local.py`) it scored 6/6 — the
+   model picks the right tool with the right arguments. But in real chat
+   it drifts:
+   - **Output verbosity collapse** — `sleeve_summary` returns rich JSON,
+     model summarizes to one sentence missing per-size detail.
+   - **Tool-call-as-text regression** — even within ctx, occasionally
+     prints `["$sleeve_summary", {}]` as chat text instead of using the
+     structured channel.
+   Try in order: (a) **few-shot examples** in the slim system prompt to
+   teach the verbose-summary pattern (cheap, ~200 extra tokens, might fix
+   both symptoms); (b) **upgrade to `qwen2.5:14b-instruct`** via a parallel
+   Modelfile (~9 GB Q4, fits 32 GB with headroom). The 7B → 14B jump for
+   tool-use quality is meaningful; speed drops moderately because the
+   bottleneck is memory bandwidth not compute.
+
+**What we learned this session (worth remembering):**
+- **Ollama OpenAI-compat ignores `extra_body.options`** — `num_ctx`, `keep_alive`,
+  etc. passed via the OpenAI SDK do not reach Ollama. Bake them into a
+  Modelfile (`boardy-qwen.Modelfile` in repo root) instead.
+- **Context overflow ⇒ silent regression.** With Boardy's full prompt + 16
+  tool schemas you exceed the 4096 default; Ollama doesn't error, the model
+  just starts emitting garbage and tool-calls-as-text. Always check `ollama ps`
+  for the actual loaded `CONTEXT`.
+- **Slim prompt for local mode.** CPU prefill at ~30 tok/s makes every
+  prompt token cost ~30ms. Cut from ~3000 to ~470 tokens by keeping only
+  the routing-critical rules (sleeve slang, add vs update inventory,
+  ask_rules for rules questions, refusal to invent metadata).
+- **Backwards-compat history is the trick that keeps both providers usable.**
+  Don't normalize stored history — translate at the boundary inside the
+  provider that needs OpenAI shape.
+
+**If neither path works on this laptop:** fall back to a **prompt-only**
+mode: stuff the DB (~56 games) directly into the system prompt as a JSON
+blob, drop all tools. Loses `update_inventory` and history queries; gains
+reliability since there's no tool-call format to regress to.
 
 ## 2. Voice input
 

@@ -1,0 +1,21 @@
+# Boardy-tuned Qwen2.5 7B Instruct
+#
+# Why a custom model: Ollama's OpenAI-compatible endpoint (/v1/chat/completions)
+# does not honor `options` or `keep_alive` passed via extra_body. Baking these
+# into a derived model is the only reliable way.
+#
+# To rebuild after editing this file:
+#   ollama create boardy-qwen -f boardy-qwen.Modelfile
+#
+# Inspect the merged config:
+#   ollama show boardy-qwen --modelfile
+FROM qwen2.5:7b-instruct
+
+# Boardy's slim system prompt + 16 tool schemas + a few rounds of history
+# can easily exceed 4096 tokens. 8192 is a safe ceiling for our workload.
+# Qwen2.5 supports up to 32k if we ever need more.
+PARAMETER num_ctx 8192
+
+# Slightly conservative sampling — tool-use benefits from less randomness.
+PARAMETER temperature 0.3
+PARAMETER top_p 0.9

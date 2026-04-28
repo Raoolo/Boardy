@@ -1,56 +1,37 @@
-"""Claude tool-use chat loop for Boardy."""
+"""Provider-agnostic tool-use chat loop for Boardy.
+
+The actual LLM client (Anthropic vs local Ollama) is selected in app/llm.py
+via the LLM_PROVIDER env var. This file owns:
+  - the system prompt (base + optional web_search addendum)
+  - the tool-use loop and round limit
+  - audit-log `_source` injection for write tools
+"""
 from __future__ import annotations
 
 import functools
 import inspect
 import json
-import os
 from typing import Any
 
-from anthropic import Anthropic
-
+from .llm import TextBlock, ToolUseBlock, get_provider
 from .tools import TOOL_FUNCS, TOOLS
 
 
 @functools.cache
 def _accepts_source(name: str) -> bool:
-    """True if a tool function declares a `_source` kwarg (write tools do, readers don't)."""
+    """True if a tool function declares a `_source` kwarg (writers do, readers don't)."""
     fn = TOOL_FUNCS.get(name)
     if fn is None:
         return False
     return "_source" in inspect.signature(fn).parameters
 
-# Trusted board-game / sleeve sources. Add domains here as you discover gaps.
-ALLOWED_DOMAINS = [
-    "boardgamegeek.com",
-    "geekdo-images.com",
-    "en.wikipedia.org",
-    "sleevegeeks.com",
-    "sleeveyourgames.com",
-    "mayday-games.com",
-    "dragonshield.com",
-    "ultrapro.com",
-    "fantasyflightgames.com",
-    "asmodee.com",
-    "cmon.com",
-    "capstone-games.com",
-    "feuerland-spiele.de",
-    "renegadegamestudios.com",
-    "stonemaiergames.com",
-    "leveluptutorialsboardgames.com",
-]
 
-WEB_SEARCH_TOOL = {
-    "type": "web_search_20250305",
-    "name": "web_search",
-    "max_uses": 5,
-    "allowed_domains": ALLOWED_DOMAINS,
-}
-
-MODEL = "claude-sonnet-4-6"
 MAX_TOOL_ROUNDS = 8
 
-SYSTEM_PROMPT = """You are Boardy, a personal assistant for Raulo's board-game collection.
+
+# Base prompt: applies to every provider. Avoid mentioning web_search here —
+# providers without it would advertise a non-existent capability.
+SYSTEM_PROMPT_BASE = """You are Boardy, a personal assistant for Raulo's board-game collection.
 
 The DB follows a star-schema:
 - `games` (dimension): name, bgg_id, year_published, players_min/max/best, duration_min,
@@ -86,41 +67,21 @@ History questions:
   call `recent_changes(limit=20, game_name?, table?)`. Do NOT answer from
   conversation memory or guesswork — the audit log is authoritative.
 
-Adding or enriching a game (IMPORTANT FLOW):
-- When the user says they added a game ("ho aggiunto X", "add Y", "aggiungi Y") or asks
-  to fill in missing fields, do NOT invent values. Use `web_search` first.
-- Recommended search query: "<game name> boardgame BGG" to land on BoardGameGeek.
-  Read out: designer (producer), publisher, min/max players, playing time, BGG weight.
+Adding or enriching a game:
+- Propose values to the user in a compact table BEFORE saving; wait for
+  explicit confirmation ("Confermo?" / "sì") before calling add_game or update_game.
+- If the game already exists, use `update_game`; otherwise `add_game`.
+- Pass `designers`, `publishers`, `categories`, `mechanics` as arrays of names.
 - Map BGG weight → complexity_label: <2.0 "1. Molto Semplice", 2.0–2.4 "2. Semplice",
   2.5–3.4 "3. Medio", 3.5–4.1 "4. Complesso", ≥4.2 "5. Esperto".
-- Always store the numeric `complexity_weight` AND `bgg_rating` (BGG average rating)
-  AND `bgg_id` AND `description` AND `thumbnail_url` AND `year_published` AND
+- Always store numeric `complexity_weight` AND `bgg_rating` AND `bgg_id` AND
+  `description` AND `thumbnail_url` AND `year_published` AND
   `duration_min_min`/`duration_max_min` when available — they enable proper sorting/queries.
-- Pass `designers`, `publishers`, `categories`, `mechanics` as arrays of names.
-- Then PROPOSE the values to the user in a compact table and ask for confirmation
-  ("Confermo?"). Do NOT call `add_game` or `update_game` until the user confirms.
-- After confirmation, call the appropriate tool. If the game already exists, use
-  `update_game`; otherwise `add_game`.
-- Sleeves: BGG rarely has card sizes/counts. Try `web_search` for "<game> sleeve sizes"
-  on sleevegeeks.com or publisher sites. If found, propose them with the rest of the
-  metadata. Always require user confirmation before saving.
-
-Citations (CRITICAL — the post-processor mangles "Fonti:" sections into garbage):
-- ABSOLUTELY FORBIDDEN: "Fonti:", "Sources:", "Riferimenti:" sections, footnote
-  lists, bullet lists of quoted excerpts. These get rendered as broken text.
-- ALLOWED: ONE inline Markdown link next to a value, e.g.
-  `| Designer | Mathias Wigger [↗](https://boardgamegeek.com/boardgame/342942) |`
-  or `Durata: 90–150 min ([BGG](https://...))`.
-- At most ONE link per row in tables, never duplicate the same URL.
-- If you'd be tempted to write "Fonti:" — STOP and put the URLs inline instead.
-
-Use `web_search` SPARINGLY: only for adding/enriching games. Use it for game
-metadata, sleeves, but NOT for rules questions — see below.
 
 Rules questions during a game (CRITICAL):
 - When the user asks "in <game> can I do X?" or any rules question, use `ask_rules`
   to retrieve relevant passages from the indexed rulebook. NEVER answer rules
-  questions from your own knowledge or web_search — official rules need exact citation.
+  questions from your own knowledge — official rules need exact citation.
 - After `ask_rules` returns excerpts, synthesize the answer ONLY from those excerpts.
   Cite the page numbers naturally: "Sì, puoi attaccare un esagono vuoto (p. 12)."
 - If the excerpts don't cover the question, say so plainly: "Il regolamento indicizzato
@@ -128,7 +89,13 @@ Rules questions during a game (CRITICAL):
 - If `ask_rules` returns an error ("no rulebook ingested"), tell the user to provide
   the PDF path and call `ingest_rulebook(game_name, pdf_path)` for them.
 
-Never for sleeve math, inventory, or anything answerable from local tools.
+Citation formatting (in case you cite an external source):
+- ABSOLUTELY FORBIDDEN: "Fonti:", "Sources:", "Riferimenti:" sections, footnote
+  lists, bullet lists of quoted excerpts. They get rendered as broken text.
+- ALLOWED: ONE inline Markdown link next to a value, e.g.
+  `| Designer | Mathias Wigger [↗](https://boardgamegeek.com/boardgame/342942) |`
+  or `Durata: 90–150 min ([BGG](https://...))`.
+- At most ONE link per row in tables, never duplicate the same URL.
 
 Formatting (UI is small; Markdown is rendered):
 - Default to SHORT prose (1–3 sentences) when the answer is short. Don't pad.
@@ -142,6 +109,74 @@ Formatting (UI is small; Markdown is rendered):
 - Re-format each turn based on the question; don't blindly copy a past style.
 """
 
+# Appended only when the provider supports web_search (Anthropic).
+SYSTEM_PROMPT_WEBSEARCH_ADDENDUM = """\
+
+Web search (Anthropic-only capability):
+- Use `web_search` ONLY for adding/enriching a game. Search "<game name> boardgame BGG"
+  to land on BoardGameGeek. Read out designer, publisher, players, duration, BGG weight,
+  rating, bgg_id, description, thumbnail, year. Then propose values + ask "Confermo?".
+- Sleeves: try "<game> sleeve sizes" on sleevegeeks.com or publisher sites.
+- Use SPARINGLY. NEVER for rules questions (use ask_rules) or anything answerable
+  from local tools (sleeve math, inventory, audit log).
+"""
+
+# Slim prompt for local providers without web_search.
+# CPU/iGPU prefill is the dominant cost, so we trade some behavioral nuance
+# for a much shorter prompt (~700 tokens vs ~3000). Keeps only the rules that
+# directly affect tool routing: which tool to pick, when to confirm, sleeve
+# slang lookup, the add_to_inventory vs update_inventory distinction.
+SYSTEM_PROMPT_SLIM = """You are Boardy, a personal assistant for Raulo's board-game collection.
+
+Reply in the user's language (Italian if they write Italian, else English).
+
+Tool calls: when you need a tool, emit it via the STRUCTURED tool-call channel —
+NEVER print JSON or XML like {"name": "...", "arguments": {...}} as chat text.
+If unsure which tool, pick the most likely one and call it; don't ask for clarification
+when a no-arg tool (sleeve_summary, list_inventory) would already answer.
+
+ALWAYS use the tools — never invent game names, counts, or sizes.
+
+Sleeve sizes: comma is decimal separator ("63,5x88" = 63.5×88). DB is in mm.
+Slang: "Standard American"=63.5×88, "Mini American"=41×63 or 44×68,
+"Catan"=57×87, "Euro"=59×92, "Tarot"=70×120. Confirm if ambiguous.
+
+Inventory (CRITICAL — never compute new = old + N yourself):
+- "ho comprato N" / "ne ho usate N" → call `add_to_inventory(width_mm, height_mm, delta=±N)`.
+  Negative delta when consuming. Server does the math.
+- "ho esattamente N in totale" → call `update_inventory(..., count_owned=N)`.
+- After the call, report previous_count, delta, count_owned from the result.
+
+For "quanti me ne mancano" → call `sleeve_summary` (no args).
+
+History questions ("quando ho aggiunto X?", "cosa è cambiato?") → call
+`recent_changes(limit=20, game_name?, table?)`. Don't guess from memory.
+
+Rules questions ("in <gioco> posso fare X?") → call `ask_rules(game_name, question)`.
+Synthesize ONLY from returned excerpts and cite page numbers. If excerpts don't
+cover it, say so plainly. Never answer rules from your own knowledge.
+If `ask_rules` errors with "no rulebook ingested", ask the user for the PDF path
+and call `ingest_rulebook(game_name, pdf_path)`.
+
+Adding/updating a game (LOCAL MODE — no web access):
+- Use only fields the user provides. Do NOT invent designer/publisher/weight/bgg_id.
+- Propose a compact table and wait for "sì/confermo" before calling add_game/update_game.
+- Lists (designers, publishers, categories, mechanics) go as arrays of strings.
+- For full BGG metadata, suggest running `etl/backfill_v2.py` from CLI.
+
+Formatting: short prose by default (1–3 sentences). Markdown OK (**bold**, tables,
+lists for ≥4 items). Avoid filler ("Ecco…", "Vuoi dettagli?").
+"""
+
+
+def _build_system_prompt(supports_web_search: bool) -> str:
+    if supports_web_search:
+        # Anthropic: full base + web_search addendum. Cache_control makes the
+        # length cheap; behavioral nuance is worth the tokens.
+        return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_WEBSEARCH_ADDENDUM
+    # Local providers (Ollama): slim prompt. CPU prefill is the bottleneck.
+    return SYSTEM_PROMPT_SLIM
+
 
 def _serialize_tool_result(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
@@ -149,67 +184,60 @@ def _serialize_tool_result(value: Any) -> str:
 
 def chat(user_message: str, history: list[dict] | None = None,
          conversation_id: int | None = None) -> tuple[str, list[dict]]:
-    """Run one user turn through Claude with tool-use. Returns (reply_text, updated_history)."""
-    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    """Run one user turn through the configured LLM with tool-use.
+
+    Returns (reply_text, updated_history). History is appended to in place
+    style (we return the new list).
+    """
+    provider = get_provider()
     history = list(history or [])
     history.append({"role": "user", "content": user_message})
     source = f"chat:{conversation_id}" if conversation_id is not None else "chat:?"
+    system_prompt = _build_system_prompt(provider.supports_web_search)
 
     for _ in range(MAX_TOOL_ROUNDS):
-        resp = client.messages.create(
-            model=MODEL,
-            max_tokens=2048,
-            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            tools=[WEB_SEARCH_TOOL, *TOOLS],
-            messages=history,
-        )
-
-        # Append the assistant turn (raw content blocks) so tool_use_id refs line up.
-        assistant_content = [block.model_dump() for block in resp.content]
-        history.append({"role": "assistant", "content": assistant_content})
+        resp = provider.run_turn(history, system_prompt, TOOLS)
+        history.append(resp.assistant_history_entry)
 
         if resp.stop_reason != "tool_use":
             text_parts: list[str] = []
-            for b in resp.content:
-                if b.type != "text":
+            for b in resp.blocks:
+                if not isinstance(b, TextBlock):
                     continue
                 text = b.text
-                # Web-search citation excerpts arrive as their own text blocks with
-                # a `citations` field. Append a compact link so the snippet has a source.
-                citations = getattr(b, "citations", None) or []
-                if citations:
-                    first = citations[0]
-                    url = getattr(first, "url", None)
+                # Anthropic citation (web_search): append a compact link so
+                # the snippet has a source even after the JSON round-trip.
+                if b.citations:
+                    url = b.citations[0].get("url")
                     if url:
                         text = f"{text.rstrip()} [↗]({url})"
                 text_parts.append(text)
             return "\n".join(text_parts).strip(), history
 
-        # Execute each tool_use block and feed results back.
-        tool_results = []
-        for block in resp.content:
-            if block.type != "tool_use":
+        # Execute each tool_use block and feed results back via the provider's
+        # preferred history shape.
+        tool_results: list[dict] = []
+        for b in resp.blocks:
+            if not isinstance(b, ToolUseBlock):
                 continue
-            func = TOOL_FUNCS.get(block.name)
+            func = TOOL_FUNCS.get(b.name)
             if func is None:
-                result = {"error": f"unknown tool {block.name}"}
+                result: Any = {"error": f"unknown tool {b.name}"}
             else:
-                # Strip any underscore-prefixed kwargs the model may have synthesized,
-                # then inject our own `_source` so the audit log knows the origin.
-                kwargs = {k: v for k, v in (block.input or {}).items() if not k.startswith("_")}
-                if _accepts_source(block.name):
+                # Strip any underscore-prefixed kwargs the model may have
+                # synthesized, then inject our `_source` so the audit log
+                # knows the origin. The model can't spoof _source because
+                # it's not declared in the JSON tool schemas.
+                kwargs = {k: v for k, v in (b.input or {}).items()
+                          if not k.startswith("_")}
+                if _accepts_source(b.name):
                     kwargs["_source"] = source
                 try:
                     result = func(**kwargs)
                 except Exception as e:  # surface tool errors back to the model
                     result = {"error": f"{type(e).__name__}: {e}"}
-            tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": _serialize_tool_result(result),
-                }
-            )
-        history.append({"role": "user", "content": tool_results})
+            tool_results.append({"tool_use_id": b.id,
+                                 "content": _serialize_tool_result(result)})
+        history.extend(provider.tool_result_history_entries(tool_results))
 
     return "Boardy gave up after too many tool rounds.", history

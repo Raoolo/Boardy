@@ -47,7 +47,9 @@ HTML/CSS/JS changes in `web/` are live (FastAPI serves the file fresh each reque
 ### Stack
 - **Python 3.13** + **FastAPI** + **uvicorn** (single worker; threadpool handles concurrency)
 - **SQLite** (one file: `boardy.db`) — no ORM, plain `sqlite3` with row factory
-- **Anthropic SDK** — `claude-sonnet-4-6` for chat, `claude-haiku-4-5-20251001` for batch backfill, plus the server-side **`web_search_20250305`** tool with a trusted-domain allowlist
+- **LLM**: pluggable via `app/llm.py` (`Provider` ABC + factory). Two implementations:
+  - **AnthropicProvider** (default) — `claude-sonnet-4-6` for chat, plus the server-side `web_search_20250305` tool with a trusted-domain allowlist. `claude-haiku-4-5-20251001` is used by the legacy `etl/backfill_bgg.py`.
+  - **OllamaProvider** — local Ollama via OpenAI-compatible endpoint (`http://localhost:11434/v1`). Tested with `qwen2.5:7b-instruct`. No web_search; relies on `etl/backfill_v2.py` for BGG metadata.
 - **sentence-transformers** (`intfloat/multilingual-e5-base`) — local embeddings, free forever, ~280MB downloaded once to `~/.cache/huggingface/`
 - **pypdf** for rulebook parsing
 - **Vanilla HTML/JS** + `marked.js` from CDN — no build step, no framework
@@ -72,15 +74,26 @@ changes              — audit log of every write (table, row_id, field, old/new
 
 ### Chat loop (the heart of the app)
 
-`app/chat.py:chat()` runs an Anthropic tool-use loop with up to 8 rounds:
+`app/chat.py:chat()` runs a provider-agnostic tool-use loop with up to 8 rounds:
 
 1. POST `/chat` with `{message, conversation_id?}` → if no `conversation_id`, creates a fresh row in `conversations`.
-2. Loads history from DB, appends the user message, calls `client.messages.create(tools=[WEB_SEARCH_TOOL, *TOOLS], system=SYSTEM_PROMPT)` with `cache_control` on the system prompt.
-3. While `stop_reason == "tool_use"`: invoke each tool from `TOOL_FUNCS`, append results, loop.
-4. When the model finishes, extract text blocks; for each `text` block with citations, append `[↗](url)` so the source survives the JSON round-trip (the frontend renders Markdown).
+2. Loads history from DB, appends the user message, calls `provider.run_turn(history, system_prompt, TOOLS)`. The provider is selected by `LLM_PROVIDER` env var (default `anthropic`).
+3. While `stop_reason == "tool_use"`: invoke each tool from `TOOL_FUNCS`, append results via `provider.tool_result_history_entries(...)`, loop.
+4. When the model finishes, extract text blocks; for each `TextBlock` with citations, append `[↗](url)` so the source survives the JSON round-trip (the frontend renders Markdown). Citations are produced only by Anthropic's `web_search`; Ollama returns plain text.
 5. Save updated history to DB.
 
-`web_search_20250305` is a **server-side tool** — Anthropic executes it transparently; we don't dispatch it. Its `allowed_domains` list (in `app/chat.py`) restricts to BGG, sleevegeeks, sleeveyourgames, dragonshield, mayday-games, asmodee, cmon, stonemaier, en.wikipedia.org, and a few publishers.
+The system prompt is built dynamically in `_build_system_prompt(supports_web_search)`: a base block that's identical across providers, plus one of two addenda — `WEBSEARCH` (Anthropic) or `NO_WEBSEARCH` (Ollama, telling the model not to invent BGG metadata and to suggest `backfill_v2.py` instead).
+
+### LLM provider layer (`app/llm.py`)
+
+Single source of truth for "how do we call the model". Three pieces:
+- **Vendor-neutral content blocks** — `TextBlock`, `ToolUseBlock`, and `ProviderResponse(stop_reason, blocks, assistant_history_entry)`. Modeled after Anthropic's shape because that was already the storage format; OllamaProvider translates on input/output to keep history backwards-compatible.
+- **`Provider` ABC** with two methods: `run_turn(...)` (one model call) and `tool_result_history_entries(...)` (how to feed tool results back; Anthropic packs into one user message, OpenAI wants one role=tool message per result).
+- **`AnthropicProvider`** owns the `WEB_SEARCH_TOOL` config (`allowed_domains` allowlist) and `cache_control`. **`OllamaProvider`** translates Anthropic-shaped `TOOLS` (input_schema) → OpenAI's function-calling envelope (parameters), and on history reads handles BOTH shapes (`_history_to_openai`) so a conversation started under Anthropic continues correctly under Ollama.
+
+Switching providers is **a per-request decision**: `get_provider()` is called inside `chat()`, so flipping `LLM_PROVIDER` and POSTing again uses the new provider without restart. Server still needs restart for code changes elsewhere.
+
+`web_search_20250305` is a **server-side tool** — Anthropic executes it transparently; we don't dispatch it. Its `allowed_domains` list (in `AnthropicProvider`) restricts to BGG, sleevegeeks, sleeveyourgames, dragonshield, mayday-games, asmodee, cmon, stonemaier, en.wikipedia.org, and a few publishers.
 
 ### Tools (`app/tools.py`)
 
@@ -134,13 +147,15 @@ Drag-and-drop: dragging a PDF anywhere on the page opens a modal with autocomple
 - **Windows console encoding is cp1252.** Any script printing `→`, `✓`, `↗`, etc. must `sys.stdout.reconfigure(encoding="utf-8")` early or run with `PYTHONIOENCODING=utf-8`. See `etl/backfill_bgg.py`.
 - **Embedding model first run downloads ~1GB** to `~/.cache/huggingface/`. Subsequent loads are ~3s.
 - **API keys**: the user's `ANTHROPIC_API_KEY` (in `.env`) works for all models — it's a single Anthropic Console key, separate from claude.ai Pro. Pro does NOT include API access.
+- **Provider selection** (`.env`): `LLM_PROVIDER=anthropic` (default) or `ollama`. Optional: `LLM_MODEL=...` to override the per-provider default (Anthropic: `claude-sonnet-4-6`; Ollama: `qwen2.5:7b-instruct`), `OLLAMA_BASE_URL=...` if Ollama runs elsewhere. Switching is instant (no restart) — the factory runs per request.
 - **BGG XML API is paywalled** since 2026-04 — both v1 (`xmlapi/...`) and v2 (`xmlapi2/...`) require a bearer token (Cloudflare-gated). Register at `boardgamegeek.com/using_the_xml_api`, set `BGG_API_TOKEN=...` in `.env`. Without it, `etl/backfill_v2.py` errors with an explicit message; the public webpage scrape via `web_search` was tried in v1 and failed (JS-rendered widgets — see LEARNINGS).
 - **Audit kwarg `_source` is internal.** Write tools accept it but it must not appear in the JSON schemas inside `TOOLS` — `app/chat.py` injects it via introspection so the model never sees or sets it. If you add a new write tool, declare `_source: str | None = None` and let chat.py handle propagation.
 
 ## Files you'll touch most
 
-- `app/tools.py` — adding a tool means: function + JSON schema in `TOOLS` + entry in `TOOL_FUNCS`. The model picks them up on next chat call (no server restart needed if just editing function bodies; restart for new TOOLS schemas). Write tools should accept `_source: str | None = None` so the audit log learns the origin automatically.
-- `app/chat.py:SYSTEM_PROMPT` — the model's behavioral spec. Keep it tight and explicit; Sonnet drifts on subtle rules.
+- `app/tools.py` — adding a tool means: function + JSON schema in `TOOLS` + entry in `TOOL_FUNCS`. The model picks them up on next chat call (no server restart needed if just editing function bodies; restart for new TOOLS schemas). Write tools should accept `_source: str | None = None` so the audit log learns the origin automatically. Schemas use Anthropic's `input_schema` shape; `OllamaProvider._tool_anthropic_to_openai` wraps it for OpenAI on the fly — no duplication.
+- `app/chat.py` — `SYSTEM_PROMPT_BASE` + addenda (`WEBSEARCH` / `NO_WEBSEARCH`). Keep base provider-agnostic; only mention web_search inside the addendum, otherwise Ollama mode advertises a non-existent capability.
+- `app/llm.py` — provider abstraction. Add a new provider (e.g. Groq, OpenRouter) by subclassing `Provider`, implementing `run_turn` + `tool_result_history_entries`, and registering it in `get_provider()`.
 - `app/schema.py` — DDL for the star schema. Add new tables here, with `CREATE TABLE IF NOT EXISTS` so `migrate()` stays idempotent.
 - `app/audit.py` — audit-log helpers. Touch when changing what we log (e.g. adding a new ignored field) or when wiring a new write path.
 - `etl/bgg_api.py` — BGG XML API2 client. Touch when BGG adds new fields we want to capture or when changing the cache strategy.

@@ -5,6 +5,124 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-04-29 — Local LLM provider (Ollama) — half-shipped, two open issues
+
+### What's new
+- `app/llm.py` introduces a **provider abstraction**: `Provider` ABC + two
+  implementations (`AnthropicProvider`, `OllamaProvider`) + a `get_provider()`
+  factory selected by `LLM_PROVIDER` env var. The chat loop in `app/chat.py`
+  now talks to providers, not directly to a vendor SDK.
+- Vendor-neutral content blocks (`TextBlock`, `ToolUseBlock`, `ProviderResponse`)
+  modeled after Anthropic's shape — that was already the on-disk history format
+  in `conversations.history_json`, so keeping the model-facing dataclasses
+  Anthropic-shaped means **OllamaProvider translates on input/output rather
+  than rewriting stored history**. Switching back-and-forth between providers
+  mid-conversation works.
+- `OllamaProvider._tool_anthropic_to_openai` wraps Anthropic schemas
+  (`name`, `description`, `input_schema`) in OpenAI's `function` envelope.
+  Same JSON Schema inside; only the wrapper differs. Zero schema duplication.
+- `app/chat.py` has dual system prompts:
+  - `SYSTEM_PROMPT_BASE` (~2.5k tok) + `SYSTEM_PROMPT_WEBSEARCH_ADDENDUM`
+    (~150 tok) for Anthropic. Cache_control makes the length cheap.
+  - `SYSTEM_PROMPT_SLIM` (~470 tok) for Ollama. CPU prefill is the bottleneck;
+    every saved token shaves ~30ms. Slim prompt explicitly forbids tool-call-
+    as-text emission.
+- `web_search_20250305` config (allowed_domains, etc.) lives **inside**
+  `AnthropicProvider`, not at module top-level. Ollama doesn't see it.
+- `boardy-qwen.Modelfile` — derived model from `qwen2.5:7b-instruct` with
+  `num_ctx=8192` and `temperature=0.3` baked in. **Required workaround**: see
+  gotcha §"Ollama OpenAI-compat ignores extra_body options" below.
+- `test_local.py` at project root — smoke test that runs 6 realistic Italian
+  prompts through the local model and reports tool-routing accuracy. Useful
+  for evaluating any new model before swapping it in.
+
+### How to switch providers
+```
+# .env
+LLM_PROVIDER=anthropic                    # default; full Sonnet experience
+# or:
+LLM_PROVIDER=ollama
+LLM_MODEL=boardy-qwen                     # the Modelfile-derived one
+```
+Restart uvicorn after changing `.env` — `python-dotenv` reads it at process
+start. The provider is then re-instantiated per request, so future env
+changes (e.g. swapping models) take effect on the next chat without app
+reload of the abstraction layer (only of the env var).
+
+### Gotcha — Ollama OpenAI-compat silently drops `extra_body.options`
+- We tried passing `extra_body={"options": {"num_ctx": 8192}, "keep_alive": "30m"}`
+  to `client.chat.completions.create()`. Both were **silently ignored** by
+  Ollama's `/v1/chat/completions` endpoint. `ollama ps` continued to show
+  `CONTEXT 4096` and `UNTIL 4 minutes from now`.
+- The fix: **bake parameters into a Modelfile**. `boardy-qwen.Modelfile`:
+  ```
+  FROM qwen2.5:7b-instruct
+  PARAMETER num_ctx 8192
+  PARAMETER temperature 0.3
+  PARAMETER top_p 0.9
+  ```
+  then `ollama create boardy-qwen -f boardy-qwen.Modelfile`. This is
+  idempotent, lives in the repo, and works with any client.
+- General rule for Ollama customization: **trust Modelfile, distrust extra_body**.
+
+### Gotcha — context overflow ⇒ silent tool-call regression
+- With Boardy's full system prompt + 16 tool schemas, a single chat turn
+  exceeds 4096 tokens. When Ollama silently truncates, Qwen2.5 doesn't error
+  out — it regresses to its base-model template behavior and starts emitting
+  tool calls **as chat text**: `{"name": "sleeve_summary", "arguments": {}}`
+  printed verbatim, sometimes preceded by hallucinated tokens like "Sinistro".
+- Symptom in the UI: the user sees the JSON of the tool call inside the chat
+  bubble as if it were prose. The actual `tool_calls` field on the response
+  is empty, so the chat loop has nothing to dispatch.
+- Diagnostic: check `ollama ps` — if `CONTEXT 4096` and your prompt is bigger,
+  you're hitting this. Bump via Modelfile.
+
+### Gotcha — first request after server boot is glacial
+- Three costs stack on the first turn after a fresh `ollama serve`:
+  1. Model load from disk (~4.6 GB → RAM): 30-60s
+  2. Kernel compilation (per-load, one-time): a few seconds
+  3. System prompt + tools prefill: ~50-100s on CPU at ~30 tok/s for
+     ~3000 tokens (Anthropic-equivalent prompt) or ~15s for the slim 470-token
+     prompt.
+- After the first turn, the model stays resident (default 5min keep_alive,
+  unfortunately also not bumpable via extra_body — set per-request via the
+  raw `/api/chat` endpoint or wait for it to reload).
+- Subsequent turns reuse partial KV cache for the system prompt: still slow
+  on CPU but ~2-3× faster than the cold path.
+
+### Open issues (resume here next session)
+1. **Inference speed** — `ollama ps` shows `100% CPU` on a Ryzen AI 7 PRO 350
+   with Radeon 860M iGPU (RDNA 3.5). Ollama on Windows + AMD APU has patchy
+   GPU support; the iGPU should be usable via Vulkan or ROCm but isn't being
+   picked up automatically. Diagnostic: read `ollama serve` startup log for
+   GPU-detection lines. Possible levers: Vulkan backend, `OLLAMA_NUM_GPU=999`,
+   or accept CPU and downsize. NPU on the 350 is not yet supported by Ollama
+   (as of 2026-04).
+2. **Output quality below threshold for 7B** — even within 8192 ctx, Qwen2.5
+   7B drifts:
+   - **Scarce summaries** when tools return rich JSON (e.g. `sleeve_summary`
+     returns full per-size needed/owned/to_buy + `games`, the model collapses
+     it to one sentence missing detail).
+   - **Sporadic tool-call-as-text regression** even without overflow
+     (`["$sleeve_summary", {}]` printed in chat).
+   - Two paths to try in order: (a) **few-shot examples in slim prompt** —
+     show the model a "good answer" template that walks through every size,
+     cheap and might be enough; (b) **upgrade to `qwen2.5:14b-instruct`**
+     via a parallel Modelfile (~9 GB Q4, fits 32 GB RAM with margin). Quality
+     jump from 7B → 14B is significant for tool-use; speed loss is moderate
+     because we're memory-bandwidth-bound.
+
+### Decision: keep both providers usable
+- AnthropicProvider remains the production default — Sonnet is still the
+  best UX for this app right now. OllamaProvider is a working alternative
+  for cost-conscious or privacy-conscious sessions.
+- This means **no Anthropic-specific code at module level** anymore — anything
+  vendor-specific (allowed_domains, cache_control, citations post-processing)
+  lives inside the provider class. If we add Groq / OpenRouter / Together
+  later, it's a single new subclass.
+
+---
+
 ## 2026-04-28 — Audit log + add_to_inventory tool
 
 ### What's new
