@@ -22,16 +22,18 @@
   }
   header {
     padding: 14px 24px; border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
   }
   h1 { font-size: 20px; margin: 0; font-weight: 600; }
   h1 .accent { color: var(--accent); }
   header .spacer { flex: 1; }
-  header a {
+  nav { display: flex; gap: 8px; }
+  nav a, header a {
     color: var(--muted); text-decoration: none; font-size: 13px;
     border: 1px solid var(--field-edge); padding: 6px 12px; border-radius: 8px;
   }
-  header a:hover { color: var(--accent); border-color: var(--accent); }
+  nav a:hover, header a:hover { color: var(--accent); border-color: var(--accent); }
+  nav a.active { color: var(--accent); border-color: var(--accent); }
   #count { color: var(--muted); font-size: 13px; }
 
   /* Filter bar */
@@ -95,6 +97,12 @@
   .pill.w4 { background: rgba(251,146,60,0.15); color: var(--w4); }
   .pill.w5 { background: rgba(248,113,113,0.15); color: var(--w5); }
 
+  /* Sleeve status pills */
+  .pill.sleeved   { background: rgba(74,222,128,0.15); color: var(--w1); }
+  .pill.to_sleeve { background: rgba(250,204,21,0.18); color: var(--w3); }
+  .pill.na        { background: rgba(138,143,153,0.18); color: var(--muted); }
+  .pill.unknown   { background: rgba(248,113,113,0.15); color: var(--w5); }
+
   .tags { display: flex; flex-wrap: wrap; gap: 4px; max-width: 280px; }
   .tag {
     background: var(--pill); color: var(--pill-fg);
@@ -109,9 +117,13 @@
 <body>
 <header>
   <h1>Bo<span class="accent">ardy</span> · Libreria</h1>
+  <nav>
+    <a href="/">Chat</a>
+    <a href="/library" class="active">Libreria</a>
+    <a href="/sleeves">Buste</a>
+  </nav>
   <span id="count"></span>
   <span class="spacer"></span>
-  <a href="/">← Chat</a>
 </header>
 
 <div class="filters">
@@ -135,6 +147,13 @@
   </select>
   <select id="category"><option value="">Categoria (qualsiasi)</option></select>
   <select id="mechanic"><option value="">Meccanica (qualsiasi)</option></select>
+  <select id="sleeve">
+    <option value="">Buste (qualsiasi)</option>
+    <option value="sleeved">✅ Sleevato</option>
+    <option value="to_sleeve">⏳ Da imbustare</option>
+    <option value="na">❌ Non applicabile</option>
+    <option value="unknown">❓ Sconosciuto</option>
+  </select>
   <button class="reset" id="reset">Azzera</button>
 </div>
 
@@ -148,6 +167,7 @@
         <th data-sort="duration" class="num">Durata</th>
         <th data-sort="weight">Complessità</th>
         <th data-sort="rating" class="num">BGG</th>
+        <th data-sort="sleeve">Buste</th>
         <th>Categorie</th>
         <th>Meccaniche</th>
       </tr>
@@ -202,6 +222,25 @@ function fmtRating(g) {
   return `<span class="rating">${g.bgg_rating.toFixed(1)}</span>`;
 }
 
+// Sleeve status: pill with emoji + label. Same color tokens as the
+// sleeves page (sleeved=green, to_sleeve=yellow, na=grey, unknown=red).
+const SLEEVE_LABELS = {
+  sleeved:   { emoji: "✅", text: "Sleevato" },
+  to_sleeve: { emoji: "⏳", text: "Da imbustare" },
+  na:        { emoji: "❌", text: "N/A" },
+  unknown:   { emoji: "❓", text: "Sconosciuto" },
+};
+function fmtSleeve(g) {
+  const s = g.sleeve_status;
+  if (!s || !SLEEVE_LABELS[s]) return `<span class="muted">—</span>`;
+  const m = SLEEVE_LABELS[s];
+  return `<span class="pill ${s}">${m.emoji} ${m.text}</span>`;
+}
+
+// Sort order for sleeve_status: actionable first, then done, then N/A.
+// Picked so default sort surfaces "what still needs work".
+const SLEEVE_SORT_RANK = { to_sleeve: 0, unknown: 1, sleeved: 2, na: 3 };
+
 function fmtTags(arr) {
   if (!arr || !arr.length) return `<span class="muted">—</span>`;
   return `<div class="tags">${arr.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>`;
@@ -227,6 +266,7 @@ function sortKeyValue(g, key) {
     case "duration": return g.duration_max_min ?? g.duration_min ?? 0;
     case "weight":   return g.complexity_weight ?? 0;
     case "rating":   return g.bgg_rating ?? 0;
+    case "sleeve":   return SLEEVE_SORT_RANK[g.sleeve_status] ?? 99;
     default:         return 0;
   }
 }
@@ -237,6 +277,7 @@ function applyFilters() {
   const complexity = document.getElementById("complexity").value;
   const category = document.getElementById("category").value;
   const mechanic = document.getElementById("mechanic").value;
+  const sleeve = document.getElementById("sleeve").value;
 
   state.filtered = state.games.filter(g => {
     if (q && !(g.name || "").toLowerCase().includes(q)) return false;
@@ -253,6 +294,7 @@ function applyFilters() {
     }
     if (category && !(g.categories || []).includes(category)) return false;
     if (mechanic && !(g.mechanics || []).includes(mechanic)) return false;
+    if (sleeve && g.sleeve_status !== sleeve) return false;
     return true;
   });
 
@@ -285,6 +327,7 @@ function render() {
         <td class="num">${fmtDuration(g)}</td>
         <td>${fmtComplexity(g)}</td>
         <td class="num">${fmtRating(g)}</td>
+        <td>${fmtSleeve(g)}</td>
         <td>${fmtTags(g.categories)}</td>
         <td>${fmtTags(g.mechanics)}</td>
       </tr>
@@ -322,13 +365,12 @@ async function load() {
 }
 
 // Wire up filter inputs
-["q", "players", "complexity", "category", "mechanic"].forEach(id => {
+const FILTER_IDS = ["q", "players", "complexity", "category", "mechanic", "sleeve"];
+FILTER_IDS.forEach(id => {
   document.getElementById(id).addEventListener("input", applyFilters);
 });
 document.getElementById("reset").addEventListener("click", () => {
-  ["q", "players", "complexity", "category", "mechanic"].forEach(id => {
-    document.getElementById(id).value = "";
-  });
+  FILTER_IDS.forEach(id => { document.getElementById(id).value = ""; });
   applyFilters();
 });
 

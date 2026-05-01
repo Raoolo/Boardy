@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<title>Boardy — Buste</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --fg: #e6e7eb; --muted: #8a8f99;
+    --accent: #5fb878; --accent-dim: #3a7c4f; --warn: #f59e0b; --danger: #f87171;
+    --border: #222831; --field: #181b22; --field-edge: #2a2f3a;
+    --row-hover: #1a1e27; --row-alt: #13161c;
+    --pill: #232936; --pill-fg: #b9c0cc;
+    --card: #161922;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+  }
+
+  /* Header / nav */
+  header {
+    padding: 14px 24px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h1 .accent { color: var(--accent); }
+  nav { display: flex; gap: 8px; }
+  nav a {
+    color: var(--muted); text-decoration: none; font-size: 13px;
+    border: 1px solid var(--field-edge); padding: 6px 12px; border-radius: 8px;
+  }
+  nav a:hover { color: var(--accent); border-color: var(--accent); }
+  nav a.active { color: var(--accent); border-color: var(--accent); }
+  header .spacer { flex: 1; }
+
+  /* Layout */
+  main { padding: 22px 24px 80px; max-width: 1200px; margin: 0 auto; }
+  section { margin-bottom: 38px; }
+  h2 {
+    font-size: 16px; margin: 0 0 14px; font-weight: 600; color: var(--fg);
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  h2 .muted-suffix { font-size: 13px; color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; margin-left: 8px; }
+
+  /* KPI cards */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .kpi {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .kpi .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .kpi .value { font-size: 28px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .kpi .value.warn { color: var(--warn); }
+  .kpi .value.ok { color: var(--accent); }
+  .kpi .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  /* Tables */
+  table {
+    width: 100%; border-collapse: separate; border-spacing: 0;
+    font-size: 13.5px; background: var(--card); border-radius: 10px; overflow: hidden;
+  }
+  th, td {
+    padding: 10px 14px; text-align: left; vertical-align: middle;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: #11141a; color: var(--muted); font-weight: 600;
+    font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--row-hover); }
+  td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  td.right { text-align: right; }
+  td .games-trigger {
+    color: var(--muted); cursor: pointer; font-size: 12px;
+    text-decoration: underline dotted; text-underline-offset: 3px;
+  }
+  td .games-trigger:hover { color: var(--accent); }
+  td .games-list { display: none; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  tr.expanded td .games-list { display: block; }
+  .badge-tobuy { color: var(--warn); font-weight: 700; }
+  .badge-ok { color: var(--accent); }
+
+  /* Inventory inline editor */
+  .inv-row .qty-controls {
+    display: inline-flex; gap: 6px; align-items: center;
+  }
+  .inv-row .qty-input {
+    width: 72px; background: var(--field); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 6px;
+    padding: 4px 8px; font-size: 13px; text-align: right; font-variant-numeric: tabular-nums;
+  }
+  .inv-row .qty-btn {
+    background: var(--field); color: var(--fg); border: 1px solid var(--field-edge);
+    border-radius: 6px; padding: 3px 9px; font-size: 12px; cursor: pointer; font-family: inherit;
+    min-width: 38px;
+  }
+  .inv-row .qty-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .inv-row .qty-btn.warn:hover { border-color: var(--danger); color: var(--danger); }
+  .inv-row .qty-save {
+    background: var(--accent-dim); color: white; border: none; border-radius: 6px;
+    padding: 4px 12px; font-size: 12px; cursor: pointer; font-family: inherit;
+    margin-left: 6px;
+  }
+  .inv-row .qty-save:hover { background: var(--accent); }
+  .inv-row .qty-save:disabled { opacity: 0.4; cursor: default; }
+  .inv-row .changed { color: var(--warn); font-weight: 600; }
+
+  /* Add-new form */
+  .add-form {
+    display: grid; grid-template-columns: repeat(4, 1fr) auto;
+    gap: 10px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .add-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  .add-form input {
+    background: var(--field); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 6px;
+    padding: 7px 10px; font-size: 13px; font-family: inherit;
+  }
+  .add-form input:focus { outline: none; border-color: var(--accent); }
+  .add-form button {
+    align-self: end; background: var(--accent-dim); color: white; border: none; border-radius: 6px;
+    padding: 8px 18px; font-size: 13px; cursor: pointer; font-family: inherit; font-weight: 600;
+  }
+  .add-form button:hover { background: var(--accent); }
+
+  /* Mini chat */
+  .mini-chat {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .mini-chat .log {
+    max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+    padding-right: 4px;
+  }
+  .mini-chat .bubble {
+    padding: 8px 12px; border-radius: 10px; font-size: 13.5px; line-height: 1.5;
+    max-width: 90%; word-wrap: break-word;
+  }
+  .mini-chat .bubble.user {
+    align-self: flex-end; background: var(--accent-dim); color: white;
+  }
+  .mini-chat .bubble.bot {
+    align-self: flex-start; background: var(--field); border: 1px solid var(--field-edge);
+  }
+  .mini-chat .bubble.bot p:first-child { margin-top: 0; }
+  .mini-chat .bubble.bot p:last-child { margin-bottom: 0; }
+  .mini-chat .bubble.bot table { margin: 6px 0; font-size: 12.5px; }
+  .mini-chat .bubble.bot th, .mini-chat .bubble.bot td { padding: 4px 8px; }
+  .mini-chat .input-row { display: flex; gap: 8px; }
+  .mini-chat textarea {
+    flex: 1; background: var(--field); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 8px;
+    padding: 8px 12px; font-size: 13px; font-family: inherit; resize: none;
+    min-height: 38px; max-height: 120px;
+  }
+  .mini-chat textarea:focus { outline: none; border-color: var(--accent); }
+  .mini-chat .send {
+    background: var(--accent-dim); color: white; border: none; border-radius: 8px;
+    padding: 0 18px; font-size: 13px; cursor: pointer; font-family: inherit; font-weight: 600;
+  }
+  .mini-chat .send:hover { background: var(--accent); }
+  .mini-chat .send:disabled { opacity: 0.5; cursor: default; }
+  .mini-chat .actions { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); }
+  .mini-chat .reset {
+    background: transparent; color: var(--muted); border: 1px solid var(--field-edge);
+    padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; font-family: inherit;
+  }
+  .mini-chat .reset:hover { color: var(--accent); border-color: var(--accent); }
+
+  .empty { color: var(--muted); font-style: italic; padding: 16px; text-align: center; }
+  .toast {
+    position: fixed; bottom: 24px; right: 24px; background: var(--card);
+    border: 1px solid var(--accent); color: var(--accent);
+    padding: 10px 18px; border-radius: 8px; font-size: 13px;
+    opacity: 0; transition: opacity 0.2s; pointer-events: none;
+  }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bo<span class="accent">ardy</span> · Buste</h1>
+  <nav>
+    <a href="/">Chat</a>
+    <a href="/library">Libreria</a>
+    <a href="/sleeves" class="active">Buste</a>
+  </nav>
+  <span class="spacer"></span>
+</header>
+
+<main>
+  <!-- KPI cards -->
+  <section>
+    <div class="kpis" id="kpis"></div>
+  </section>
+
+  <!-- Da comprare -->
+  <section>
+    <h2>🛒 Da comprare <span class="muted-suffix" id="tobuy-meta"></span></h2>
+    <div id="tobuy-wrap"></div>
+  </section>
+
+  <!-- Inventario -->
+  <section>
+    <h2>📦 Inventario <span class="muted-suffix" id="inv-meta"></span></h2>
+    <div id="inv-wrap"></div>
+  </section>
+
+  <!-- Aggiungi misura -->
+  <section>
+    <h2>➕ Aggiungi misura</h2>
+    <form class="add-form" id="add-form">
+      <label>Larghezza (mm)
+        <input type="number" id="add-w" step="0.5" min="10" max="200" required placeholder="63.5" />
+      </label>
+      <label>Altezza (mm)
+        <input type="number" id="add-h" step="0.5" min="10" max="200" required placeholder="88" />
+      </label>
+      <label>Quantità
+        <input type="number" id="add-c" step="1" min="0" required placeholder="100" />
+      </label>
+      <label>Brand (opzionale)
+        <input type="text" id="add-b" placeholder="Mayday, Sapphire, …" />
+      </label>
+      <button type="submit">Aggiungi</button>
+    </form>
+  </section>
+
+  <!-- Mini chat -->
+  <section>
+    <h2>💬 Chat veloce <span class="muted-suffix">(separata dalla chat principale)</span></h2>
+    <div class="mini-chat">
+      <div class="log" id="chat-log"></div>
+      <div class="input-row">
+        <textarea id="chat-input" placeholder="Es. 'aggiungi 100 buste 63.5×88 brand Mayday' o 'quante buste mi mancano?'" rows="1"></textarea>
+        <button class="send" id="chat-send">Invia</button>
+      </div>
+      <div class="actions">
+        <span id="chat-status"></span>
+        <span class="spacer" style="flex:1"></span>
+        <button class="reset" id="chat-reset">Nuova chat</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const STATE = { data: null, dirtyRows: new Set() };
+
+// ---------- helpers ----------
+function fmt(n) { return n == null ? "—" : n.toLocaleString("it-IT"); }
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function showToast(msg, isError) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.toggle("error", !!isError);
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+// ---------- load + render ----------
+async function load() {
+  const r = await fetch("/sleeves/data");
+  STATE.data = await r.json();
+  renderKpis();
+  renderToBuy();
+  renderInventory();
+}
+
+function renderKpis() {
+  const k = STATE.data.kpis;
+  const html = [
+    {label:"Totale in magazzino", value:fmt(k.total_owned), klass:"ok", sub:"buste possedute"},
+    {label:"Da comprare", value:fmt(k.total_to_buy), klass: k.total_to_buy > 0 ? "warn" : "ok",
+     sub: k.total_to_buy > 0 ? "buste mancanti" : "tutto a posto ✓"},
+    {label:"Misure coperte", value:`${k.sizes_covered} / ${k.sizes_total}`, klass:"",
+     sub: "misure senza fabbisogno aperto"},
+  ].map(c => `
+    <div class="kpi">
+      <div class="label">${c.label}</div>
+      <div class="value ${c.klass}">${c.value}</div>
+      <div class="sub">${c.sub}</div>
+    </div>
+  `).join("");
+  document.getElementById("kpis").innerHTML = html;
+}
+
+function renderToBuy() {
+  const rows = STATE.data.to_buy;
+  const meta = document.getElementById("tobuy-meta");
+  const wrap = document.getElementById("tobuy-wrap");
+  if (!rows.length) {
+    meta.textContent = "";
+    wrap.innerHTML = `<div class="empty">Niente da comprare 🎉 — tutte le misure richieste sono coperte.</div>`;
+    return;
+  }
+  meta.textContent = `${rows.length} ${rows.length === 1 ? "misura" : "misure"} da acquistare`;
+  wrap.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Misura</th>
+        <th class="right">Necessarie</th>
+        <th class="right">Possedute</th>
+        <th class="right">Da comprare</th>
+        <th>Per quali giochi</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((r, i) => `
+          <tr data-i="${i}">
+            <td><strong>${r.size}</strong> mm</td>
+            <td class="num right">${fmt(r.needed)}</td>
+            <td class="num right">${fmt(r.owned)}</td>
+            <td class="num right badge-tobuy">⚠️ ${fmt(r.to_buy)}</td>
+            <td>
+              <span class="games-trigger" onclick="this.parentElement.parentElement.classList.toggle('expanded')">
+                ${(r.games || "").split(", ").length} giochi
+              </span>
+              <div class="games-list">${escapeHtml(r.games || "")}</div>
+            </td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderInventory() {
+  const rows = STATE.data.inventory;
+  const meta = document.getElementById("inv-meta");
+  const wrap = document.getElementById("inv-wrap");
+  meta.textContent = `${rows.length} ${rows.length === 1 ? "riga" : "righe"}`;
+  if (!rows.length) {
+    wrap.innerHTML = `<div class="empty">Nessuna busta in inventario.</div>`;
+    return;
+  }
+  wrap.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Misura</th>
+        <th>Brand</th>
+        <th class="right">Possedute</th>
+        <th class="right">Modifica</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr class="inv-row" data-w="${r.width_mm}" data-h="${r.height_mm}" data-brand="${escapeHtml(r.brand || '')}">
+            <td><strong>${r.size}</strong> mm</td>
+            <td>${r.brand ? escapeHtml(r.brand) : '<span style="color:var(--muted)">—</span>'}</td>
+            <td class="num right">
+              <input type="number" class="qty-input" value="${r.count_owned}" data-original="${r.count_owned}" />
+            </td>
+            <td class="right">
+              <span class="qty-controls">
+                <button class="qty-btn warn" data-delta="-50">-50</button>
+                <button class="qty-btn warn" data-delta="-10">-10</button>
+                <button class="qty-btn" data-delta="10">+10</button>
+                <button class="qty-btn" data-delta="50">+50</button>
+                <button class="qty-btn" data-delta="100">+100</button>
+                <button class="qty-save" disabled>Salva</button>
+              </span>
+            </td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+  wireInventoryRows();
+}
+
+function wireInventoryRows() {
+  document.querySelectorAll(".inv-row").forEach(tr => {
+    const input = tr.querySelector(".qty-input");
+    const save = tr.querySelector(".qty-save");
+
+    function refresh() {
+      const orig = parseInt(input.dataset.original, 10);
+      const cur = parseInt(input.value, 10);
+      const dirty = !Number.isNaN(cur) && cur !== orig && cur >= 0;
+      save.disabled = !dirty;
+      input.classList.toggle("changed", dirty);
+    }
+
+    input.addEventListener("input", refresh);
+
+    tr.querySelectorAll(".qty-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const delta = parseInt(btn.dataset.delta, 10);
+        const cur = parseInt(input.value, 10) || 0;
+        const next = Math.max(0, cur + delta);
+        input.value = next;
+        refresh();
+      });
+    });
+
+    save.addEventListener("click", async () => {
+      const orig = parseInt(input.dataset.original, 10);
+      const cur = parseInt(input.value, 10);
+      const delta = cur - orig;
+      if (delta === 0) return;
+      save.disabled = true;
+      try {
+        const r = await fetch("/sleeves/inventory/delta", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            width_mm: parseFloat(tr.dataset.w),
+            height_mm: parseFloat(tr.dataset.h),
+            delta,
+            brand: tr.dataset.brand || null,
+          }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${r.status}`);
+        }
+        showToast(`Salvato: ${delta > 0 ? "+" : ""}${delta} buste`);
+        await load();
+      } catch (e) {
+        showToast(`Errore: ${e.message}`, true);
+        save.disabled = false;
+      }
+    });
+  });
+}
+
+// ---------- add-new form ----------
+document.getElementById("add-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const w = parseFloat(document.getElementById("add-w").value);
+  const h = parseFloat(document.getElementById("add-h").value);
+  const c = parseInt(document.getElementById("add-c").value, 10);
+  const b = document.getElementById("add-b").value.trim() || null;
+  if (!(w > 0 && h > 0 && c >= 0)) {
+    showToast("Compila tutti i campi numerici", true);
+    return;
+  }
+  try {
+    // Use upsert (absolute count) — more intuitive for a manual entry form
+    // ("ho 100 buste di questa misura"), and works whether the row exists
+    // or not. For partial increments use the inventory section above.
+    const r = await fetch("/sleeves/inventory/upsert", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({width_mm: w, height_mm: h, count_owned: c, brand: b}),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    showToast(`Aggiunto: ${c} buste ${w}×${h}${b ? ' · ' + b : ''}`);
+    document.getElementById("add-form").reset();
+    await load();
+  } catch (e) {
+    showToast(`Errore: ${e.message}`, true);
+  }
+});
+
+// ---------- mini chat ----------
+const CHAT_KEY = "boardy_sleeves_conv_id";
+let CHAT = { convId: null, history: [] };
+
+function setChatConvId(id) {
+  CHAT.convId = id;
+  if (id) localStorage.setItem(CHAT_KEY, String(id));
+  else    localStorage.removeItem(CHAT_KEY);
+}
+
+function renderChat() {
+  const log = document.getElementById("chat-log");
+  log.innerHTML = "";
+  for (const turn of CHAT.history) {
+    if (turn.role === "user" && typeof turn.content === "string") {
+      addChatBubble(turn.content, "user");
+    } else if (turn.role === "assistant") {
+      let text = "";
+      if (Array.isArray(turn.content)) {
+        text = turn.content.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+      } else if (typeof turn.content === "string") {
+        text = turn.content.trim();
+      }
+      if (text) addChatBubble(text, "bot");
+    }
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+function addChatBubble(text, who) {
+  const div = document.createElement("div");
+  div.className = `bubble ${who}`;
+  if (who === "bot") div.innerHTML = marked.parse(text);
+  else               div.textContent = text;
+  document.getElementById("chat-log").appendChild(div);
+  document.getElementById("chat-log").scrollTop = 1e9;
+}
+
+async function loadChatConv() {
+  const saved = localStorage.getItem(CHAT_KEY);
+  if (!saved) return;
+  try {
+    const r = await fetch("/conversations/" + saved);
+    if (!r.ok) { setChatConvId(null); return; }
+    const c = await r.json();
+    CHAT.convId = c.id;
+    CHAT.history = c.history || [];
+    renderChat();
+  } catch (e) { setChatConvId(null); }
+}
+
+async function sendChat() {
+  const ta = document.getElementById("chat-input");
+  const msg = ta.value.trim();
+  if (!msg) return;
+  const send = document.getElementById("chat-send");
+  const status = document.getElementById("chat-status");
+  send.disabled = true;
+  status.textContent = "Sto pensando…";
+  addChatBubble(msg, "user");
+  ta.value = "";
+  ta.style.height = "auto";
+
+  try {
+    const r = await fetch("/chat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message: msg, conversation_id: CHAT.convId}),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    setChatConvId(data.conversation_id);
+    CHAT.history = data.history;
+    renderChat();
+    // Reload data — chat may have updated inventory/requirements
+    await load();
+  } catch (e) {
+    addChatBubble(`⚠️ Errore: ${escapeHtml(e.message)}`, "bot");
+  } finally {
+    status.textContent = "";
+    send.disabled = false;
+  }
+}
+
+document.getElementById("chat-send").addEventListener("click", sendChat);
+document.getElementById("chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendChat();
+  }
+});
+document.getElementById("chat-input").addEventListener("input", (e) => {
+  e.target.style.height = "auto";
+  e.target.style.height = Math.min(120, e.target.scrollHeight) + "px";
+});
+document.getElementById("chat-reset").addEventListener("click", () => {
+  setChatConvId(null);
+  CHAT.history = [];
+  renderChat();
+  showToast("Nuova chat avviata");
+});
+
+// ---------- init ----------
+load();
+loadChatConv();
+</script>
+</body>
+</html>
