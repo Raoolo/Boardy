@@ -75,7 +75,10 @@
   tbody tr:last-child td { border-bottom: none; }
   tbody tr:hover { background: var(--row-hover); }
   td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  td.right { text-align: right; }
+  /* Numeric/action columns: right-align both header and cells so digits
+     line up by place value (units under units) and headers sit above
+     their data. Industry-standard data-table convention. */
+  th.right, td.right { text-align: right; }
   td .games-trigger {
     color: var(--muted); cursor: pointer; font-size: 12px;
     text-decoration: underline dotted; text-underline-offset: 3px;
