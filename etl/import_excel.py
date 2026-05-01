@@ -53,7 +53,6 @@ CREATE TABLE games (
   condition TEXT,
   notes TEXT,
   sleeve_status TEXT,
-  sleeve_raw TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -110,10 +109,13 @@ SLEEVE_PATTERN_REV = re.compile(
 PLAYERS_PATTERN = re.compile(r"(\d+)\s*-\s*(\d+)")
 SINGLE_PLAYER_PATTERN = re.compile(r"^(\d+)$")
 
+# 'no' and 'na' both map to 'na' — they were originally distinct
+# (intentional skip vs. not-applicable) but in practice they mean the
+# same thing for this collection: doesn't need sleeving.
 STATUS_MAP = {
     "sleeved": "sleeved",
     "sleevato": "sleeved",
-    "no": "no",
+    "no": "na",
     "n.a.": "na",
     "na": "na",
     "n/a": "na",
@@ -123,8 +125,18 @@ STATUS_MAP = {
 def classify_sleeve(raw: str | None) -> tuple[str, list[tuple[int, float, float, str | None]]]:
     """Return (status, [(count, w, h, note), ...]).
 
-    Status is one of: sleeved, no, na, to_sleeve, unknown.
+    Status is one of: sleeved, na, to_sleeve, unknown.
     The list contains parsed per-size requirements (may be empty).
+
+    Status mapping rules (refined 2026-04-29 after misclassification audit):
+    - Cell == "Sleeved" / "Sleevato"            → sleeved, []
+    - Cell == "No" / "n.a." / "n/a" / "na"      → na, []
+    - Cell contains "DA COMPRARE"               → to_sleeve, [parsed reqs]
+    - Cell contains "COMPRATE"                  → sleeved, [] (purchased & applied;
+                                                  invariant: sleeved must NOT carry reqs)
+    - Cell has only numeric size info, no marker → unknown, [parsed reqs]
+        (NOT sleeved! The Excel column listed CARD SIZES; sleeving status
+         is unverified, requires manual review post-import.)
     """
     if raw is None or not str(raw).strip():
         return "unknown", []
@@ -158,9 +170,17 @@ def classify_sleeve(raw: str | None) -> tuple[str, list[tuple[int, float, float,
         requirements.append((count, width, height, note))
 
     if requirements:
-        # Has structured sleeve data => game needs/has sleeves listed by size
-        status = "to_sleeve" if note == "DA COMPRARE" else "sleeved"
-        return status, requirements
+        if note == "DA COMPRARE":
+            return "to_sleeve", requirements
+        if note == "COMPRATE":
+            # Already purchased AND applied. Invariant: sleeved games carry
+            # no requirements rows — they'd inflate `sleeve_summary.to_buy`.
+            # The size info is preserved in this audit/log path via the
+            # original Excel cell only.
+            return "sleeved", []
+        # No status marker — just numeric sizes. Don't assume sleeved!
+        # Default to unknown so the user can confirm post-import.
+        return "unknown", requirements
 
     # Couldn't parse — still report as unknown for manual review
     return "unknown", []
@@ -223,7 +243,9 @@ def main() -> None:
         status, reqs = classify_sleeve(sleeve_raw)
 
         # If raw text is present but produced no status match and no parsed reqs,
-        # log it for manual review.
+        # log it for manual review. The raw cell itself is NOT stored — it was
+        # an Excel-import artifact that duplicated info already in
+        # sleeve_status / sleeve_requirements (see etl/cleanup_sleeve.py).
         if (
             sleeve_raw_str
             and status == "unknown"
@@ -234,11 +256,11 @@ def main() -> None:
         cur = conn.execute(
             """INSERT INTO games(name, players_min, players_max, players_best,
                                  duration_min, complexity_label, condition,
-                                 sleeve_status, sleeve_raw)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
+                                 sleeve_status)
+               VALUES(?,?,?,?,?,?,?,?)""",
             (
                 name, p_min, p_max, players_raw,
-                duration, complexity, condition, status, sleeve_raw_str,
+                duration, complexity, condition, status,
             ),
         )
         game_id = cur.lastrowid
@@ -254,6 +276,11 @@ def main() -> None:
                 pid = _upsert_dim(conn, "publishers", p)
                 conn.execute("INSERT OR IGNORE INTO game_publishers(game_id, publisher_id) VALUES(?,?)", (game_id, pid))
 
+        # Invariant: sleeved/na games must not carry pending requirements rows.
+        # `classify_sleeve` already enforces this, but we double-check here so a
+        # future regression doesn't silently re-introduce phantom sleeves.
+        if status in ("sleeved", "na"):
+            reqs = []
         for count, w, h, note in reqs:
             conn.execute(
                 """INSERT INTO sleeve_requirements(game_id, count, width_mm, height_mm, note)

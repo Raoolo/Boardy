@@ -15,6 +15,7 @@ dependencies = [
     "pypdf>=5.0.0",
     "numpy>=1.26.0",
     "openai>=2.33.0",
+    "tavily-python>=0.5.0",
 ]
 
 [tool.uv]

@@ -1,18 +1,26 @@
 """LLM provider abstraction for Boardy.
 
-Two providers behind a common interface:
-- AnthropicProvider: production default. Claude via API, includes web_search.
-- OllamaProvider:    local fallback via OpenAI-compatible endpoint.
+Three providers behind a common interface:
+- AnthropicProvider: Claude via API.
+- DeepSeekProvider:  DeepSeek via OpenAI-compatible API. Cheap (~10× less
+                     than Sonnet) with solid tool use; no native search.
+- OllamaProvider:    local Ollama via OpenAI-compatible endpoint.
+
+Web search is now a CLIENT-SIDE tool (Tavily-backed, see app/tools.py),
+so all providers share the same capability surface — no more
+WEBSEARCH/NO_WEBSEARCH asymmetry in the system prompt.
 
 The chat loop in app/chat.py is provider-agnostic: it passes Anthropic-style
 tool schemas (TOOLS from app/tools.py) and gets back a ProviderResponse with
-normalized content blocks. OllamaProvider translates schemas + history to
-OpenAI shape on input, and translates tool_calls back on output.
+normalized content blocks. OpenAI-compatible providers translate schemas +
+history on input, and translate tool_calls back on output.
 
 Switch via env:
-  LLM_PROVIDER=anthropic | ollama   (default: anthropic)
-  LLM_MODEL=...                     (default per provider)
-  OLLAMA_BASE_URL=...               (default: http://localhost:11434/v1)
+  LLM_PROVIDER=anthropic | deepseek | ollama   (default: anthropic)
+  LLM_MODEL=...                                (default per provider)
+  DEEPSEEK_API_KEY=...                         (required for deepseek)
+  DEEPSEEK_BASE_URL=...                        (default: https://api.deepseek.com/v1)
+  OLLAMA_BASE_URL=...                          (default: http://localhost:11434/v1)
 """
 from __future__ import annotations
 
@@ -56,7 +64,9 @@ class ProviderResponse:
 
 class Provider(ABC):
     name: str
-    supports_web_search: bool = False
+    # Local / small-context models prefer the slim system prompt to keep
+    # CPU prefill costs low. API-served frontier models use the full prompt.
+    prefer_slim_prompt: bool = False
 
     @abstractmethod
     def run_turn(self, history: list[dict], system_prompt: str,
@@ -79,22 +89,6 @@ class Provider(ABC):
 
 class AnthropicProvider(Provider):
     name = "anthropic"
-    supports_web_search = True
-
-    ALLOWED_DOMAINS = [
-        "boardgamegeek.com", "geekdo-images.com", "en.wikipedia.org",
-        "sleevegeeks.com", "sleeveyourgames.com", "mayday-games.com",
-        "dragonshield.com", "ultrapro.com", "fantasyflightgames.com",
-        "asmodee.com", "cmon.com", "capstone-games.com",
-        "feuerland-spiele.de", "renegadegamestudios.com",
-        "stonemaiergames.com", "leveluptutorialsboardgames.com",
-    ]
-    WEB_SEARCH_TOOL = {
-        "type": "web_search_20250305",
-        "name": "web_search",
-        "max_uses": 5,
-        "allowed_domains": ALLOWED_DOMAINS,
-    }
 
     def __init__(self, model: str | None = None, max_tokens: int = 2048) -> None:
         from anthropic import Anthropic
@@ -110,7 +104,7 @@ class AnthropicProvider(Provider):
             # no-ops elsewhere. Saves ~75% on input tokens for repeated turns.
             system=[{"type": "text", "text": system_prompt,
                      "cache_control": {"type": "ephemeral"}}],
-            tools=[self.WEB_SEARCH_TOOL, *tools],
+            tools=tools,
             messages=history,
         )
         blocks: list[TextBlock | ToolUseBlock] = []
@@ -152,14 +146,17 @@ class AnthropicProvider(Provider):
 
 class OllamaProvider(Provider):
     name = "ollama"
-    supports_web_search = False
+    prefer_slim_prompt = True  # local CPU prefill is the bottleneck
 
-    def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
+    def __init__(self, model: str | None = None, base_url: str | None = None,
+                 api_key: str | None = None) -> None:
         from openai import OpenAI
         self._client = OpenAI(
             base_url=base_url or os.environ.get(
                 "OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-            api_key="ollama",  # SDK requires non-empty; Ollama ignores the value
+            # Ollama ignores the value but the SDK requires non-empty;
+            # subclasses (DeepSeek, etc.) pass a real key here.
+            api_key=api_key or "ollama",
         )
         # Default to the Boardy-tuned derived model (boardy-qwen.Modelfile),
         # which bakes in num_ctx=8192 and saner sampling. Ollama's OpenAI-
@@ -299,6 +296,30 @@ class OllamaProvider(Provider):
 
 
 # ============================================================================
+# DeepSeek (OpenAI-compatible, hosted)
+# ============================================================================
+
+class DeepSeekProvider(OllamaProvider):
+    """DeepSeek via the official OpenAI-compatible endpoint.
+
+    Reuses OllamaProvider's translation layer (Anthropic↔OpenAI tool schemas
+    + history) — only the client config changes (real API key, hosted URL,
+    `prefer_slim_prompt=False` because we're on a frontier model, not a
+    7B local one).
+    """
+    name = "deepseek"
+    prefer_slim_prompt = False
+
+    def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
+        super().__init__(
+            model=model or os.environ.get("LLM_MODEL", "deepseek-chat"),
+            base_url=base_url or os.environ.get(
+                "DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+            api_key=os.environ["DEEPSEEK_API_KEY"],
+        )
+
+
+# ============================================================================
 # Factory
 # ============================================================================
 
@@ -306,6 +327,10 @@ def get_provider() -> Provider:
     name = os.environ.get("LLM_PROVIDER", "anthropic").lower()
     if name == "anthropic":
         return AnthropicProvider()
+    if name == "deepseek":
+        return DeepSeekProvider()
     if name == "ollama":
         return OllamaProvider()
-    raise ValueError(f"unknown LLM_PROVIDER {name!r}. Use 'anthropic' or 'ollama'.")
+    raise ValueError(
+        f"unknown LLM_PROVIDER {name!r}. Use 'anthropic', 'deepseek', or 'ollama'."
+    )

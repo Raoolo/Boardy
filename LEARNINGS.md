@@ -5,7 +5,191 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
-## 2026-04-29 — Local LLM provider (Ollama) — half-shipped, two open issues
+## 2026-04-29 (Late PM) — DeepSeek + Tavily, sleeve schema redesign, import bug fix
+
+### TL;DR
+Massive cleanup session. Three big changes:
+1. **Provider**: switched default from Anthropic Sonnet to **DeepSeek-chat** via the
+   OpenAI-compatible endpoint (~10× cheaper). `web_search_20250305` (Anthropic-only)
+   replaced by a **client-side `web_search` tool backed by Tavily** — works the
+   same with any provider.
+2. **Sleeve schema redesign** — `sleeve_raw` dropped (Excel artifact, fully
+   redundant with `sleeve_status` + `sleeve_requirements`). `sleeve_requirements`
+   reinterpreted as a **TODO list** (only games NOT yet sleeved have rows).
+   Status `no` collapsed into `na`. Cascade-on-status-flip + guard rules enforce
+   the invariant.
+3. **Import bug**: `classify_sleeve()` defaulted numeric-only Excel cells to
+   `sleeved`. Wrong — those cells listed *card sizes*, not sleeving status.
+   Fixed default to `unknown`. 5 games (Gloomhaven JoL, Room-25, HeroQuest,
+   Memoir '44, Obscurio) restored from audit log to `to_sleeve` with their
+   original requirements.
+
+### What's new in code
+- `app/llm.py` — new `DeepSeekProvider` (subclass of `OllamaProvider` with own
+  api_key + base_url). Removed `WEB_SEARCH_TOOL` server-side config from
+  `AnthropicProvider`. `supports_web_search` → `prefer_slim_prompt` (only Ollama
+  uses slim now; both API providers use the full BASE prompt).
+- `app/tools.py` — new tool `web_search(query, include_domains?, max_results?,
+  search_depth?)` Tavily-backed with `DEFAULT_TRUSTED_DOMAINS` allowlist
+  matching the old Anthropic one. Total tools: **16** (was 15).
+- `app/tools.py` — `update_game` now does **cascade-clear** of
+  `sleeve_requirements` when status flips to `sleeved`/`na`. Audit-logged with
+  `cascade=status->X` suffix on source. `set_sleeve_requirements` **rejects**
+  with explicit error if game is already `sleeved`/`na`.
+- `app/schema.py` — `NEW_GAMES_DDL` no longer contains `sleeve_raw`. Added
+  idempotent v3 migration `_migrate_v3_drop_sleeve_raw` (drops column +
+  collapses leftover `no`→`na` if present at boot).
+- `etl/import_excel.py` — `classify_sleeve` rules refined:
+  - `Sleeved`/`Sleevato` → `sleeved, []`
+  - `No`/`n.a.`/`na`/`n/a` → `na, []`
+  - "DA COMPRARE …" → `to_sleeve, [reqs]`
+  - "COMPRATE …" → `sleeved, []` (invariant: drop reqs even if parsed)
+  - **only numeric data, no marker** → `unknown, [reqs]` (was `sleeved`!)
+  Plus a defensive belt-and-braces: even if classify_sleeve returns reqs for a
+  `sleeved`/`na` status, the INSERT path forces `reqs = []`.
+- `app/chat.py` — system prompts:
+  - BASE: rewrote sleeve section with **TWO sources + invariant** + cascade
+    behavior; added strict count-integrity rule ("the number you write in a
+    header MUST equal len(list_below)").
+  - SLIM: compressed version of the same rules.
+  - Web search guidance moved into BASE (English game names, sleeveyourgames
+    flow, BGG flow).
+  - Anti-hallucination: "for full-collection queries call `list_games()`
+    with NO filters first — prior tool results are subsets, never recall from
+    memory."
+- `app/chat.py` — **terminal logging** of every tool-use round. `[boardy]`
+  prefix lines on stdout via `_log()` show conv id, round, tool calls with
+  truncated args, and tool results with size+shape. Visible live in the
+  uvicorn terminal — no UI work needed.
+
+### Cleanup scripts (all in `etl/`, all idempotent, all audit-logged)
+- `cleanup_sleeve.py` — dropped `sleeve_raw` column (audited 44 prior values),
+  collapsed 3 `no` rows into `na`. Sources: `cleanup_sleeve_v3_drop_raw`,
+  `cleanup_sleeve_v3_collapse_no_to_na`.
+- `sync_sleeved_status.py` — removed phantom requirements from 11 sleeved
+  games (1807 sleeves of inflation in `sleeve_summary.to_buy`).
+  Source: `sync_sleeved_status_2026-04-29`.
+- `fix_misclassified_sleeve.py` — restored 5 games to `to_sleeve` and
+  re-inserted their original requirements pulled from the
+  `sync_sleeved_status_2026-04-29` audit rows.
+  Source: `fix_misclassified_sleeve_2026-04-29`.
+- `fix_encoding.py` — renamed 3 games (`Here To Slay, Gioco` → `Here To Slay`;
+  `Singore`→`Signore`; stripped `\n` from Sherlock Holmes).
+  Source: `manual_encoding_fix_2026-04-29`.
+
+### The recurring lesson: model hallucinates counts even with anti-hallucination prompt
+Even with the "ALWAYS call tools, never invent" rule already in place, the
+model wrote count headers (e.g. "5 to_sleeve") that didn't match the lists it
+then printed (6 items). The fix is to make the rule **operational**:
+> the number you write MUST equal `len(list_below)`. Count by enumeration,
+> not from memory. There is no situation where a header count and its list
+> disagree.
+TBD if this works in practice — needs another full-collection query to verify.
+
+### Costs
+- DeepSeek-chat: ~$0.27/M input, ~$1.10/M output. ~10× cheaper than Sonnet 4.6.
+- Tavily: 1000 searches/month free (`TAVILY_API_KEY`). Paid tier ~$4/1000 ricerche
+  if exceeded. Boardy uses ≤5 ricerche per query, easy to stay under.
+- Net: personal-use Boardy budget ~$0.10/month on DeepSeek + free Tavily.
+
+### Recovery commands (if something needs un-doing)
+```sql
+-- Original sleeve_raw values
+SELECT row_label, old_value FROM changes
+WHERE source='cleanup_sleeve_v3_drop_raw' ORDER BY id;
+
+-- Original requirements deleted by sync
+SELECT row_label, old_value FROM changes
+WHERE source='sync_sleeved_status_2026-04-29' AND field='requirements';
+
+-- Misclassified games before fix
+SELECT row_label, old_value, new_value FROM changes
+WHERE source='fix_misclassified_sleeve_2026-04-29';
+```
+
+### Next-time touchpoints
+- The 23 sleeved games with NO requirements stay as-is (Wingspan, Sagrada
+  family, 7 Wonders family, etc.). User confirmed: "fine to leave them — they're
+  done, no decision needed for buying." If user ever wants size info for those,
+  use `web_search` on sleeveyourgames per game on demand.
+- If Tavily quota becomes an issue, switch the `web_search` impl to Brave
+  Search or self-hosted SearXNG — the tool interface is provider-agnostic, only
+  the function body in `app/tools.py:web_search` needs swapping.
+- `Le Leggende di Andor - L'ultima speranza` has a curly apostrophe (`'`) in
+  the DB; ASCII apostrophe lookup fails. Cosmetic; fix if it bites.
+
+---
+
+## 2026-04-29 (PM) — Local LLM archived: hardware + 7B not enough for Boardy
+
+### TL;DR
+Tornati ad Anthropic Sonnet 4.6 dopo aver portato a termine la fase di benchmark.
+Il provider abstraction resta in codice (zero rollback); è solo un flip di `LLM_PROVIDER`
+in `.env` per riattivarlo. Motivi: hardware sbagliato + 7B troppo piccolo per il
+tool-use complesso di Boardy. **Non è un bug fixabile a parità di hardware.**
+
+### Numeri reali misurati su HP ZBook G1a (Ryzen AI 7 PRO 350 + Radeon 860M + 32GB)
+| Config | Eval rate | Note |
+|---|---|---|
+| Vulkan iGPU + flash_attn | 5.54 tok/s | GPU usata al 100% ma più lenta del CPU |
+| **CPU + flash_attn** | **5.74 tok/s** | Baseline reale, marginalmente più veloce |
+| End-to-end "quante buste mi mancano?" | **254 secondi** | tool-loop + prefill |
+
+### Insight strutturale: iGPU AMD non aiuta su questo hardware
+- La Radeon 860M è RDNA 3.5 ma è una **iGPU che condivide la RAM col CPU**.
+  Senza VRAM dedicata, zero vantaggio di bandwidth → il bottleneck (memory-bound
+  inference su modelli 7B Q4) resta identico tra CPU e iGPU.
+- Vulkan attivato via `OLLAMA_VULKAN=1` mostra `library=Vulkan` con 16.1 GiB
+  "VRAM" (in realtà RAM riassegnata) ma il throughput è uguale o peggiore.
+- **Lasciato `OLLAMA_VULKAN=0`** come env utente persistente; `OLLAMA_FLASH_ATTENTION=1`
+  attivo (dà +32% reale su CPU).
+- **NPU AMD XDNA da 50 TOPS NON usata** da Ollama. Per sfruttarla serve sostituire
+  runtime con AMD Ryzen AI Software / Lemonade SDK — side-project a sé, non
+  praticabile come "ottimizzazione" di Ollama.
+
+### Insight: 7B Q4 non basta per tool-use complesso in italiano
+- Qwen2.5 7B Q4 con `num_ctx=8192` (Modelfile ok, vedi sotto) regredisce comunque
+  emettendo tool calls **come testo letterale** (`[tool_call sleeve_summary()]`,
+  `{"name":"sleeve_summary","arguments":{}}`).
+- Few-shot inseriti per insegnare a verbalizzare i JSON di `sleeve_summary` /
+  `add_to_inventory` hanno **peggiorato il problema**: avevo usato `[tool_call X → {...}]`
+  come marker pseudocodice nei `## Examples`, e il modello l'ha imitato pari pari.
+  **Lezione: nei few-shot per modelli piccoli, mai usare sintassi che assomiglia
+  a struttura tool-use.** Ho riscritto la sezione in forma puramente dichiarativa
+  ("If sleeve_summary returns rows like X, reply like Y") — non testato a fondo
+  perché abbiamo deciso di mollare prima.
+- Il salto a `qwen2.5:14b-instruct` non è stato provato (entra in 32GB ma a ~3 tok/s
+  diventa inutilizzabile). Per Boardy serve almeno un 32B+ con tool-use serio,
+  che non gira su questa macchina.
+
+### Cosa resta nel codice (preservato, riusabile)
+- `app/llm.py`, `app/chat.py` (con `SYSTEM_PROMPT_SLIM` aggiornato), `app/tools.py`
+  invariati. `_build_system_prompt(supports_web_search)` sceglie il prompt giusto.
+- `boardy-qwen.Modelfile` + `test_local.py` restano nel repo.
+- `.env`: `LLM_PROVIDER=anthropic`, riga `LLM_MODEL=boardy-qwen` commentata.
+
+### Quando riaprire il discorso
+- Se cambi hardware (dGPU NVIDIA con VRAM dedicata, o nuovo laptop con stack
+  Ryzen AI funzionante in Ollama).
+- Se esce un modello 4-7B con tool-use davvero buono (Llama 4 small? Qwen3?).
+- Se Anthropic alza i prezzi al punto da pesare sul budget personale (oggi
+  Boardy stimato ~$1-5/mese, non un problema).
+
+### Gotcha confermati durante il tentativo (utili per il futuro)
+- Ollama OpenAI-compat ignora silenziosamente `extra_body.options` → bake in
+  Modelfile. (vedi sezione storica sotto)
+- Context overflow → tool-call regression silenziosa. (idem)
+- Prima richiesta dopo `ollama serve` è glaciale (load+kernel+prefill stack).
+- Su Windows, `taskkill //F //IM ollama.exe` chiude il runner ma **non** la
+  "ollama app.exe" che fa da launcher; vanno killati entrambi prima di un riavvio
+  pulito con env vars nuove.
+- `setx VAR VALUE` aggiorna il registro ma le shell già aperte vedono ancora il
+  vecchio valore — il riavvio Ollama deve avvenire da una shell nuova oppure
+  passandolo inline (`OLLAMA_VULKAN=1 ollama serve`).
+
+---
+
+## 2026-04-29 (AM) — Local LLM provider (Ollama) — half-shipped, two open issues
 
 ### What's new
 - `app/llm.py` introduces a **provider abstraction**: `Provider` ABC + two

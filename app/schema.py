@@ -39,7 +39,6 @@ CREATE TABLE games (
   condition TEXT,
   notes TEXT,
   sleeve_status TEXT,
-  sleeve_raw TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -180,6 +179,47 @@ CREATE INDEX IF NOT EXISTS idx_changes_ts ON changes(ts DESC);
 """
 
 
+def _migrate_v3_drop_sleeve_raw(conn: sqlite3.Connection) -> None:
+    """v3: drop `games.sleeve_raw` (Excel-import artifact, redundant).
+
+    Idempotent — only runs if the column still exists. Audit-logs each
+    non-null value before the ALTER so the data is recoverable from
+    `changes` if ever needed.
+
+    Also collapses any leftover `sleeve_status='no'` into `'na'` since
+    the two values now mean the same thing ("doesn't need sleeving").
+    """
+    if _has_column(conn, "games", "sleeve_raw"):
+        # Lazy import to avoid circular: audit imports nothing app-level
+        # but stays low-coupling here.
+        from . import audit
+        for r in conn.execute(
+            "SELECT id, name, sleeve_raw FROM games WHERE sleeve_raw IS NOT NULL"
+        ).fetchall():
+            audit.log_change(
+                conn, table="games", row_id=r["id"], row_label=r["name"],
+                action="update", field="sleeve_raw",
+                old=r["sleeve_raw"], new=None,
+                source="schema_v3_drop_raw",
+            )
+        conn.execute("ALTER TABLE games DROP COLUMN sleeve_raw")
+
+    # Defensive: collapse any 'no' rows. After cleanup_sleeve.py this is
+    # usually a no-op, but covers fresh imports that still emit 'no'.
+    rows = conn.execute(
+        "SELECT id, name FROM games WHERE sleeve_status='no'"
+    ).fetchall()
+    if rows:
+        from . import audit
+        for r in rows:
+            audit.log_change(
+                conn, table="games", row_id=r["id"], row_label=r["name"],
+                action="update", field="sleeve_status",
+                old="no", new="na", source="schema_v3_collapse_no_to_na",
+            )
+        conn.execute("UPDATE games SET sleeve_status='na' WHERE sleeve_status='no'")
+
+
 def migrate() -> None:
     with get_conn() as conn:
         # If `games` doesn't exist at all, nothing to do — ETL will create it.
@@ -199,5 +239,9 @@ def migrate() -> None:
 
         # Audit log (Step 3: history of writes)
         conn.executescript(CHANGES_DDL)
+
+        # v3: drop sleeve_raw + collapse 'no'→'na' (idempotent).
+        # Must run AFTER changes table exists since it audit-logs the drop.
+        _migrate_v3_drop_sleeve_raw(conn)
 
         conn.commit()

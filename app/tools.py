@@ -5,10 +5,23 @@ Anthropic `tools=` argument.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from . import audit
 from .db import get_conn
+
+# Trusted-domain allowlist for web_search. Mirrors the old Anthropic
+# server-side allowlist so search quality on BGG / sleeve sites is preserved.
+# Pass `include_domains=[...]` explicitly to override (e.g. only sleeveyourgames).
+DEFAULT_TRUSTED_DOMAINS = [
+    "boardgamegeek.com", "geekdo-images.com", "en.wikipedia.org",
+    "sleevegeeks.com", "sleeveyourgames.com", "mayday-games.com",
+    "dragonshield.com", "ultrapro.com", "fantasyflightgames.com",
+    "asmodee.com", "cmon.com", "capstone-games.com",
+    "feuerland-spiele.de", "renegadegamestudios.com",
+    "stonemaiergames.com",
+]
 
 DIM_TABLES = {  # bridge_table -> (dim_table, fk_col)
     "game_designers":  ("designers",  "designer_id"),
@@ -16,6 +29,38 @@ DIM_TABLES = {  # bridge_table -> (dim_table, fk_col)
     "game_categories": ("categories", "category_id"),
     "game_mechanics":  ("mechanics",  "mechanic_id"),
 }
+
+# `sleeve_requirements` is a TODO list ("pending work"). Once a game enters one
+# of these statuses, any pending rows must be cleared — they no longer
+# represent real demand for `sleeve_summary.to_buy`.
+DONE_SLEEVE_STATUSES = ("sleeved", "na")
+
+
+def _clear_requirements_if_done(conn, gid: int, name: str,
+                                 new_status: str | None,
+                                 source: str | None) -> int:
+    """If new_status is a 'done' status, drop pending requirements for the game.
+
+    Returns the count of deleted rows. Audit-logs the deletion as a single
+    `requirements` field change (matching set_sleeve_requirements' pattern).
+    Idempotent — no-op if there were no pending rows.
+    """
+    if new_status not in DONE_SLEEVE_STATUSES:
+        return 0
+    old_rows = [dict(r) for r in conn.execute(
+        "SELECT count, width_mm, height_mm, note FROM sleeve_requirements "
+        "WHERE game_id=? ORDER BY width_mm, height_mm", (gid,)
+    ).fetchall()]
+    if not old_rows:
+        return 0
+    conn.execute("DELETE FROM sleeve_requirements WHERE game_id=?", (gid,))
+    audit.log_change(
+        conn, table="sleeve_requirements", row_id=gid, row_label=name,
+        action="update", field="requirements",
+        old=old_rows, new=[],
+        source=f"{source or 'unknown'} cascade=status->{new_status}",
+    )
+    return len(old_rows)
 
 
 # ----- helpers -----
@@ -249,6 +294,10 @@ def update_game(
             arg_name = bridge.replace("game_", "")
             _set_bridges(conn, gid, bridge, dim, fk, locals().get(arg_name))
 
+        # Cascade: status flipped to a 'done' state → drop pending requirements.
+        # Runs INSIDE the same transaction so a failed audit rolls back the delete.
+        cleared = _clear_requirements_if_done(conn, gid, name, sleeve_status, _source)
+
         # Snapshot AFTER and diff.
         after = dict(conn.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone())
         for bridge, (dim, fk) in DIM_TABLES.items():
@@ -257,7 +306,13 @@ def update_game(
         n_logged = audit.log_diff(conn, table="games", row_id=gid, row_label=name,
                                   before=before, after=after, source=_source)
         conn.commit()
-    return {"ok": True, "name": name, "updated_scalar": list(fields.keys()), "audit_rows": n_logged}
+    result = {"ok": True, "name": name, "updated_scalar": list(fields.keys()),
+              "audit_rows": n_logged}
+    if cleared:
+        result["cleared_requirements"] = cleared
+        result["note"] = (f"sleeve_status set to {sleeve_status!r}; cleared "
+                          f"{cleared} pending sleeve_requirements row(s).")
+    return result
 
 
 def delete_game(name: str, _source: str | None = None) -> dict:
@@ -280,12 +335,28 @@ def delete_game(name: str, _source: str | None = None) -> dict:
 
 def set_sleeve_requirements(name: str, requirements: list[dict],
                             _source: str | None = None) -> dict:
-    """Replace sleeve requirements for a game. Items: {count, width_mm, height_mm, note?}."""
+    """Replace sleeve requirements for a game. Items: {count, width_mm, height_mm, note?}.
+
+    Refuses if the game's `sleeve_status` is in DONE_SLEEVE_STATUSES — those
+    games are considered "done" and must not carry pending TODO rows. Flip
+    status first via `update_game(name, sleeve_status='to_sleeve' | 'unknown')`
+    if you actually want to record new pending work.
+    Empty `requirements=[]` is allowed regardless (acts as a clear).
+    """
     with get_conn() as conn:
-        row = conn.execute("SELECT id FROM games WHERE LOWER(name)=LOWER(?)", (name,)).fetchone()
+        row = conn.execute(
+            "SELECT id, sleeve_status FROM games WHERE LOWER(name)=LOWER(?)", (name,)
+        ).fetchone()
         if not row:
             return {"error": f"Game {name!r} not found"}
         gid = row["id"]
+        if requirements and row["sleeve_status"] in DONE_SLEEVE_STATUSES:
+            return {"error": (
+                f"{name!r} has sleeve_status={row['sleeve_status']!r}; pending "
+                f"requirements are not allowed on 'done' games. "
+                f"Call update_game(name, sleeve_status='to_sleeve') first if "
+                f"this game actually needs sleeves recorded."
+            )}
         # Snapshot existing requirements as a sorted list of tuples for diff readability.
         before_rows = [dict(r) for r in conn.execute(
             "SELECT count, width_mm, height_mm, note FROM sleeve_requirements WHERE game_id=? ORDER BY width_mm, height_mm",
@@ -504,6 +575,60 @@ def list_rulebooks() -> list[dict]:
     return rulebooks.list_rulebooks()
 
 
+def web_search(query: str, include_domains: list[str] | None = None,
+               max_results: int = 5, search_depth: str = "basic") -> dict:
+    """Tavily-backed web search. Returns top results as {title, url, content}.
+
+    The tool is provider-agnostic: it works the same with Anthropic, DeepSeek,
+    or Ollama. For board-game queries, Tavily's `include_domains` restricts
+    results to trusted sources (BGG, sleevegeeks, sleeveyourgames, publishers).
+
+    USAGE NOTES (the model should follow these):
+    - Use the ENGLISH game name. International sites (sleeveyourgames.com, BGG)
+      do not index Italian titles. "Ali Spiegate" → "Wingspan".
+    - For sleeve-size lookups, narrow with
+      `include_domains=["sleeveyourgames.com"]` and query "<game> sleeves".
+    - For BGG metadata, use the default allowlist and query
+      "<game> boardgame BGG".
+    - Cite sources INLINE as Markdown links pulled from the `url` field —
+      no "Fonti:" sections (the post-processor mangles them).
+    """
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        return {"error": "TAVILY_API_KEY not set in .env. "
+                         "Get a free key at https://tavily.com (1000 searches/month free)."}
+    try:
+        from tavily import TavilyClient
+    except ImportError:
+        return {"error": "tavily-python not installed. Run `uv sync`."}
+
+    domains = include_domains if include_domains is not None else DEFAULT_TRUSTED_DOMAINS
+    k = max(1, min(int(max_results), 10))
+    if search_depth not in ("basic", "advanced"):
+        search_depth = "basic"
+
+    try:
+        resp = TavilyClient(api_key=api_key).search(
+            query=query,
+            include_domains=domains,
+            max_results=k,
+            search_depth=search_depth,
+            include_answer=False,
+        )
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    return {
+        "query": query,
+        "domains_used": domains,
+        "results": [
+            {"title": r.get("title"), "url": r.get("url"),
+             "content": r.get("content")}
+            for r in resp.get("results", [])
+        ],
+    }
+
+
 def list_dimension(table: str) -> list[dict]:
     """List unique values of a dimension table with their game count."""
     if table not in {"designers", "publishers", "categories", "mechanics"}:
@@ -541,7 +666,7 @@ _SCALAR_FIELDS = {
     "language":          {"type": "string"},
     "condition":         {"type": "string"},
     "notes":             {"type": "string"},
-    "sleeve_status":     {"type": "string", "enum": ["sleeved", "to_sleeve", "no", "na", "unknown"]},
+    "sleeve_status":     {"type": "string", "enum": ["sleeved", "to_sleeve", "na", "unknown"]},
 }
 _LIST_FIELDS = {
     "designers":  {"type": "array", "items": {"type": "string"}, "description": "Designer name(s)."},
@@ -560,7 +685,7 @@ TOOLS = [
                 "name_contains":       {"type": "string"},
                 "players":             {"type": "integer"},
                 "complexity_contains": {"type": "string"},
-                "sleeve_status":       {"type": "string", "enum": ["sleeved", "to_sleeve", "no", "na", "unknown"]},
+                "sleeve_status":       {"type": "string", "enum": ["sleeved", "to_sleeve", "na", "unknown"]},
                 "designer_contains":   {"type": "string"},
                 "publisher_contains":  {"type": "string"},
                 "category_contains":   {"type": "string"},
@@ -739,6 +864,43 @@ TOOLS = [
             "required": ["table"],
         },
     },
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web for board-game info NOT in the local DB or rulebook index. "
+            "Backed by Tavily; pre-filtered to trusted domains (BGG, sleevegeeks, "
+            "sleeveyourgames, publishers, Wikipedia). "
+            "USE FOR: sleeve sizes ('<game> sleeves' on sleeveyourgames.com), BGG "
+            "metadata when adding/updating a game ('<game> boardgame BGG'), publisher "
+            "errata. DO NOT USE FOR: rules questions (use ask_rules), inventory math, "
+            "audit log queries, anything answerable from the local DB. "
+            "ALWAYS use the ENGLISH game name — international sites don't index Italian "
+            "titles (e.g. 'Wingspan', not 'Ali Spiegate'). "
+            "For sleeve lookups specifically, pass include_domains=['sleeveyourgames.com']. "
+            "Cite sources as inline Markdown links from the returned `url` field."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query in English."},
+                "include_domains": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Restrict to these domains. Omit to use the default trusted "
+                        "allowlist. Use ['sleeveyourgames.com'] for sleeve-size lookups."
+                    ),
+                },
+                "max_results": {"type": "integer", "description": "1–10 (default 5)."},
+                "search_depth": {
+                    "type": "string",
+                    "enum": ["basic", "advanced"],
+                    "description": "'advanced' is slower/costlier but better for hard queries.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -758,4 +920,5 @@ TOOL_FUNCS = {
     "ingest_rulebook":         ingest_rulebook,
     "ask_rules":               ask_rules,
     "list_rulebooks":          list_rulebooks,
+    "web_search":              web_search,
 }

@@ -1,10 +1,14 @@
 """Provider-agnostic tool-use chat loop for Boardy.
 
-The actual LLM client (Anthropic vs local Ollama) is selected in app/llm.py
-via the LLM_PROVIDER env var. This file owns:
-  - the system prompt (base + optional web_search addendum)
+The actual LLM client (Anthropic / DeepSeek / local Ollama) is selected in
+app/llm.py via the LLM_PROVIDER env var. This file owns:
+  - the system prompt (full base for API providers, slim for local Ollama)
   - the tool-use loop and round limit
   - audit-log `_source` injection for write tools
+
+Web search is a CLIENT-SIDE tool now (Tavily, see app/tools.py:web_search),
+so all providers expose the same capability — the prompt no longer branches
+on whether the provider has native search.
 """
 from __future__ import annotations
 
@@ -29,23 +33,55 @@ def _accepts_source(name: str) -> bool:
 MAX_TOOL_ROUNDS = 8
 
 
-# Base prompt: applies to every provider. Avoid mentioning web_search here —
-# providers without it would advertise a non-existent capability.
+# Base prompt: applies to every API-served provider (Anthropic, DeepSeek).
+# web_search is a client-side tool now (Tavily), available to all providers.
 SYSTEM_PROMPT_BASE = """You are Boardy, a personal assistant for Raulo's board-game collection.
 
 The DB follows a star-schema:
 - `games` (dimension): name, bgg_id, year_published, players_min/max/best, duration_min,
   age_min, complexity_label & complexity_weight, bgg_rating, description, thumbnail_url,
-  language, condition, notes, sleeve_status, sleeve_raw, created/updated_at.
+  language, condition, notes, sleeve_status, created/updated_at.
 - Outrigger dimensions: `designers`, `publishers`, `categories`, `mechanics` —
   each linked many-to-many via `game_designers`, `game_publishers`, `game_categories`,
   `game_mechanics`. Use list-typed args (`designers=[...]`) on add_game/update_game.
 - Facts: `sleeve_requirements` (game × size × count), `sleeve_inventory` (size × owned).
+
+Sleeve data — TWO sources with a strict invariant:
+- `games.sleeve_status`: intent flag. Values: `sleeved` | `to_sleeve` | `na` | `unknown`.
+  `na` covers BOTH "not applicable" and "I chose not to sleeve" (same bucket).
+  There is NO `'no'`.
+- `sleeve_requirements`: a TODO list — pending work only. A row exists ONLY for
+  games NOT yet sleeved (status `to_sleeve` / `unknown`). `sleeve_summary` sums
+  these to compute "how many to buy".
+- INVARIANT: games with status `sleeved` or `na` MUST have zero rows in
+  `sleeve_requirements`. The tools enforce this:
+    * `update_game(..., sleeve_status='sleeved')` automatically deletes any
+      pending requirements for that game (cascade, audit-logged).
+    * `set_sleeve_requirements` REFUSES on `sleeved`/`na` games with a clear
+      error — flip status first.
+- When the user says "ho sleevato X", just call `update_game(name=X,
+  sleeve_status='sleeved')` — the cascade is automatic. Don't call
+  `set_sleeve_requirements(X, [])` separately; the bot will do it.
 - Audit: every write goes through `changes` (auto-logged). Use `recent_changes` to
   read history; never invent a "when did I add X?" answer.
 
 Rules:
 - ALWAYS answer using the tools — never invent game names, counts, or sizes.
+- NEVER list, summarize, or count games from MEMORY or from prior tool results
+  in this conversation. Prior results are subsets — they do NOT contain games
+  you didn't query. If the user asks anything that requires the FULL collection
+  view (counts, "all my games", "the situation of my collection", grouping by
+  status, etc.), you MUST first call `list_games()` with NO filters — that's
+  the only way to see all 56 rows. Then derive numbers from the returned list,
+  not from recall.
+- When grouping by `sleeve_status`, run ONE call per status value
+  (sleeved, to_sleeve, na, unknown) and verify the totals add up to the
+  full count from `list_games()`. If they don't match, you missed a category.
+- COUNT INTEGRITY: any number you write (in a header, summary, or sentence)
+  MUST equal `len(list_you_will_show_below)`. Count by enumerating, not from
+  memory. If you write "X giochi" / "X games" and then a list with N items
+  where N ≠ X, your output is WRONG — recount before sending. This is a hard
+  rule: there is no situation where a header count and its list disagree.
 - Match the user's language: reply in Italian if they write in Italian, English otherwise.
 - For "how many sleeves to buy", call `sleeve_summary` and report by size.
 - When a sleeve size is given as e.g. "63.5x88" or "63,5x88", treat the comma as a
@@ -107,18 +143,23 @@ Formatting (UI is small; Markdown is rendered):
 - Emojis: use when they aid scanning (✅/❌ for status, 🎲 next to a game). Avoid
   decorative pile-ups.
 - Re-format each turn based on the question; don't blindly copy a past style.
-"""
 
-# Appended only when the provider supports web_search (Anthropic).
-SYSTEM_PROMPT_WEBSEARCH_ADDENDUM = """\
-
-Web search (Anthropic-only capability):
-- Use `web_search` ONLY for adding/enriching a game. Search "<game name> boardgame BGG"
-  to land on BoardGameGeek. Read out designer, publisher, players, duration, BGG weight,
-  rating, bgg_id, description, thumbnail, year. Then propose values + ask "Confermo?".
-- Sleeves: try "<game> sleeve sizes" on sleevegeeks.com or publisher sites.
-- Use SPARINGLY. NEVER for rules questions (use ask_rules) or anything answerable
-  from local tools (sleeve math, inventory, audit log).
+Web search (`web_search` tool, Tavily-backed):
+- ALWAYS use the ENGLISH game name in queries. International sites (BGG,
+  sleeveyourgames.com) don't index Italian titles. The DB stores the BGG
+  canonical (English) name in `games.name`; if the user types Italian,
+  resolve via `list_games(name_contains=...)` first to get the English name.
+- SLEEVE SIZES: query `"<game> sleeves"` with
+  `include_domains=["sleeveyourgames.com"]`. The site lists exact mm sizes
+  + counts per game. Read out values, then propose `set_sleeve_requirements`.
+- BGG METADATA (adding/enriching a game): query `"<game> boardgame BGG"`
+  with default domains. Extract designer, publisher, players, duration,
+  weight, rating, bgg_id, description, thumbnail, year. Propose a table,
+  ask "Confermo?", then call add_game/update_game.
+- Use SPARINGLY. NEVER for rules questions (use `ask_rules`) or anything
+  the local DB can answer (sleeve math, inventory, audit log).
+- Cite sources INLINE as Markdown links from the result `url` field.
+  ABSOLUTELY NO "Fonti:" / "Sources:" lists.
 """
 
 # Slim prompt for local providers without web_search.
@@ -136,10 +177,18 @@ If unsure which tool, pick the most likely one and call it; don't ask for clarif
 when a no-arg tool (sleeve_summary, list_inventory) would already answer.
 
 ALWAYS use the tools — never invent game names, counts, or sizes.
+For full-collection queries (counts, "all my games", grouping by status) call
+`list_games()` with NO filters first — prior tool results are subsets, not totals.
+Never recall or enumerate from memory.
 
 Sleeve sizes: comma is decimal separator ("63,5x88" = 63.5×88). DB is in mm.
 Slang: "Standard American"=63.5×88, "Mini American"=41×63 or 44×68,
 "Catan"=57×87, "Euro"=59×92, "Tarot"=70×120. Confirm if ambiguous.
+
+Sleeve data: `sleeve_status` ∈ {sleeved, to_sleeve, na, unknown} (no 'no').
+`sleeve_requirements` = TODO list — exists ONLY for non-sleeved games.
+"Ho sleevato X" → `update_game(name=X, sleeve_status='sleeved')`; cascade
+auto-clears pending rows. Never `set_sleeve_requirements` on sleeved/na games.
 
 Inventory (CRITICAL — never compute new = old + N yourself):
 - "ho comprato N" / "ne ho usate N" → call `add_to_inventory(width_mm, height_mm, delta=±N)`.
@@ -158,28 +207,78 @@ cover it, say so plainly. Never answer rules from your own knowledge.
 If `ask_rules` errors with "no rulebook ingested", ask the user for the PDF path
 and call `ingest_rulebook(game_name, pdf_path)`.
 
-Adding/updating a game (LOCAL MODE — no web access):
-- Use only fields the user provides. Do NOT invent designer/publisher/weight/bgg_id.
+Adding/updating a game:
+- Use `web_search` (Tavily) for BGG metadata: query "<game> boardgame BGG" with
+  the ENGLISH game name. Don't invent fields not in the search results.
+- For sleeve sizes: query "<game> sleeves" with include_domains=["sleeveyourgames.com"].
 - Propose a compact table and wait for "sì/confermo" before calling add_game/update_game.
 - Lists (designers, publishers, categories, mechanics) go as arrays of strings.
-- For full BGG metadata, suggest running `etl/backfill_v2.py` from CLI.
+- For deterministic bulk backfill from BGG XML API, suggest `etl/backfill_v2.py`.
 
 Formatting: short prose by default (1–3 sentences). Markdown OK (**bold**, tables,
 lists for ≥4 items). Avoid filler ("Ecco…", "Vuoi dettagli?").
+
+## How to verbalize tool results
+
+After a tool returns JSON, write a short natural-language reply — never echo
+the JSON, never write `[tool_call ...]`, never use brackets-as-pseudocode.
+
+If `sleeve_summary` returns rows like
+  {"size":"63.5x88","needed":520,"owned":300,"to_buy":220}
+reply like: "Ti mancano **220 buste 63.5×88**." Mention sizes with `to_buy=0`
+only briefly ("per le 45×68 sei a posto").
+
+If `add_to_inventory` returns {"size":"...","previous_count":N,"delta":D,"count_owned":M}
+reply like: "Aggiornato: **63.5×88** da N → **M** (+D)." Always include all three numbers.
 """
 
 
-def _build_system_prompt(supports_web_search: bool) -> str:
-    if supports_web_search:
-        # Anthropic: full base + web_search addendum. Cache_control makes the
-        # length cheap; behavioral nuance is worth the tokens.
-        return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_WEBSEARCH_ADDENDUM
-    # Local providers (Ollama): slim prompt. CPU prefill is the bottleneck.
-    return SYSTEM_PROMPT_SLIM
+def _build_system_prompt(prefer_slim: bool) -> str:
+    # Local providers (Ollama on CPU/iGPU) want the slim prompt to keep prefill
+    # cheap. API-served providers (Anthropic, DeepSeek) get the full base —
+    # tokens are cheap, behavioral nuance is worth it.
+    return SYSTEM_PROMPT_SLIM if prefer_slim else SYSTEM_PROMPT_BASE
 
 
 def _serialize_tool_result(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _log(msg: str) -> None:
+    """Write a tagged line to stdout — visible in the uvicorn terminal.
+
+    Tag `[boardy]` makes it grep-friendly and distinguishable from uvicorn's
+    own access log. flush=True ensures lines appear in real time even with
+    buffered stdout (Windows + cmd defaults to fully-buffered for non-TTY).
+    """
+    print(f"[boardy] {msg}", flush=True)
+
+
+def _summarize_args(args: dict | None) -> str:
+    """Compact preview of tool arguments. Truncates long strings for readability."""
+    if not args:
+        return "{}"
+    parts = []
+    for k, v in args.items():
+        if isinstance(v, str) and len(v) > 60:
+            parts.append(f"{k}={v[:57]!r}…")
+        elif isinstance(v, list) and len(v) > 5:
+            parts.append(f"{k}=[{len(v)} items]")
+        else:
+            parts.append(f"{k}={v!r}")
+    return "{" + ", ".join(parts) + "}"
+
+
+def _summarize_result(value: Any, serialized: str) -> str:
+    """Compact preview of tool result. Shows shape + size, not full JSON."""
+    size = len(serialized)
+    if isinstance(value, list):
+        return f"list[{len(value)}] ({size}B)"
+    if isinstance(value, dict):
+        if "error" in value:
+            return f"ERROR: {value['error'][:120]!r}"
+        return f"dict ({size}B)"
+    return f"{type(value).__name__} ({size}B)"
 
 
 def chat(user_message: str, history: list[dict] | None = None,
@@ -193,11 +292,23 @@ def chat(user_message: str, history: list[dict] | None = None,
     history = list(history or [])
     history.append({"role": "user", "content": user_message})
     source = f"chat:{conversation_id}" if conversation_id is not None else "chat:?"
-    system_prompt = _build_system_prompt(provider.supports_web_search)
+    system_prompt = _build_system_prompt(provider.prefer_slim_prompt)
 
-    for _ in range(MAX_TOOL_ROUNDS):
+    conv = conversation_id if conversation_id is not None else "?"
+    user_preview = user_message.replace("\n", " ")
+    if len(user_preview) > 80:
+        user_preview = user_preview[:77] + "…"
+    _log(f"conv={conv} provider={provider.name} model={getattr(provider, 'model', '?')} "
+         f"user={user_preview!r}")
+
+    for round_idx in range(1, MAX_TOOL_ROUNDS + 1):
         resp = provider.run_turn(history, system_prompt, TOOLS)
         history.append(resp.assistant_history_entry)
+
+        n_text = sum(1 for b in resp.blocks if isinstance(b, TextBlock))
+        n_tool = sum(1 for b in resp.blocks if isinstance(b, ToolUseBlock))
+        _log(f"conv={conv} round={round_idx} stop={resp.stop_reason} "
+             f"text_blocks={n_text} tool_calls={n_tool}")
 
         if resp.stop_reason != "tool_use":
             text_parts: list[str] = []
@@ -220,6 +331,7 @@ def chat(user_message: str, history: list[dict] | None = None,
         for b in resp.blocks:
             if not isinstance(b, ToolUseBlock):
                 continue
+            _log(f"conv={conv}   call {b.name} {_summarize_args(b.input)}")
             func = TOOL_FUNCS.get(b.name)
             if func is None:
                 result: Any = {"error": f"unknown tool {b.name}"}
@@ -236,8 +348,10 @@ def chat(user_message: str, history: list[dict] | None = None,
                     result = func(**kwargs)
                 except Exception as e:  # surface tool errors back to the model
                     result = {"error": f"{type(e).__name__}: {e}"}
-            tool_results.append({"tool_use_id": b.id,
-                                 "content": _serialize_tool_result(result)})
+            serialized = _serialize_tool_result(result)
+            _log(f"conv={conv}   result {b.name} → {_summarize_result(result, serialized)}")
+            tool_results.append({"tool_use_id": b.id, "content": serialized})
         history.extend(provider.tool_result_history_entries(tool_results))
 
+    _log(f"conv={conv} GAVE UP after {MAX_TOOL_ROUNDS} rounds")
     return "Boardy gave up after too many tool rounds.", history
