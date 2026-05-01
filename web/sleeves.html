@@ -95,6 +95,12 @@
     border: 1px solid var(--field-edge); border-radius: 6px;
     padding: 4px 8px; font-size: 13px; text-align: right; font-variant-numeric: tabular-nums;
   }
+  /* Hide native browser spinners — the +/- preset buttons replace them. */
+  .inv-row .qty-input::-webkit-outer-spin-button,
+  .inv-row .qty-input::-webkit-inner-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
+  .inv-row .qty-input { -moz-appearance: textfield; appearance: textfield; }
   .inv-row .qty-btn {
     background: var(--field); color: var(--fg); border: 1px solid var(--field-edge);
     border-radius: 6px; padding: 3px 9px; font-size: 12px; cursor: pointer; font-family: inherit;
@@ -124,6 +130,11 @@
     padding: 7px 10px; font-size: 13px; font-family: inherit;
   }
   .add-form input:focus { outline: none; border-color: var(--accent); }
+  .add-form input[type=number]::-webkit-outer-spin-button,
+  .add-form input[type=number]::-webkit-inner-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
+  .add-form input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   .add-form button {
     align-self: end; background: var(--accent-dim); color: white; border: none; border-radius: 6px;
     padding: 8px 18px; font-size: 13px; cursor: pointer; font-family: inherit; font-weight: 600;
