@@ -27,10 +27,10 @@ For long-form rationale see `secondbrain/memo-boardy-future.md`.
 - [x] Counting bug: list-returning tools now wrap as `{count, items}` so the model transcribes the integer instead of estimating list length. Header/list mismatch ("28 giochi" with list of 29) eliminated. (2026-05-01)
 - [x] **`/sleeves` dashboard** (2026-05-01): KPI cards, "Da comprare" table, inventory with inline +/- preset buttons (`-50/-10/+10/+50/+100`), quick-add form, mini-chat with separate `conversation_id`. New endpoints `/sleeves/data`, `/sleeves/inventory/delta`, `/sleeves/inventory/upsert` (audit-source `web:sleeves`). Library got a Buste status pill column + filter; nav `Chat / Libreria / Buste` shared across pages.
 - [x] **Frontend rerender bug** (2026-05-01): `web/index.html` only rendered Anthropic-shape histories (`content` as array). DeepSeek/OpenAI shape (`content` string + separate `tool_calls`) was silently skipped → reloaded conversations showed only user bubbles. Now accepts both shapes per turn.
+- [x] **Citation suffix cleanup** (2026-05-01): killed the `[↗](url)` pattern. The prompt was teaching the model to write arrow-icon link suffixes; replaced the example with normal `[Value](url)` syntax. Also dropped the dead Anthropic-citation injection in `chat.py` — Tavily-backed `web_search` makes citations the model's own prose now.
 
 ## 🔴 High priority
 - [ ] **AI-ready: embeddings on `games.description`** for semantic search ("ho voglia di un gioco di esplorazione spaziale"). Reuse the rulebooks embedding pipeline; one pass when description is set/updated. (memo §8)
-- [ ] **Frontend citation polish** — the `[↗](url)` suffix is ugly; convert text-block citations into superscript footnotes with a sources panel at the bottom of each bot bubble. Now that web_search is client-side (Tavily), the citation source is `web_search` tool results, not Anthropic's `assistant.content[].citations` — adapt accordingly.
 
 ## 🟡 Medium priority
 - [ ] **Library v2: thumbnail grid view** — toggle on `/library` between the current dense table and a card grid (cover from `thumbnail_url`, name, players, duration, weight). Useful for visual browsing; the table stays the default for filtering/sorting.

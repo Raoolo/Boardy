@@ -130,8 +130,10 @@ Rules questions during a game (CRITICAL):
 Citation formatting (in case you cite an external source):
 - ABSOLUTELY FORBIDDEN: "Fonti:", "Sources:", "Riferimenti:" sections, footnote
   lists, bullet lists of quoted excerpts. They get rendered as broken text.
-- ALLOWED: ONE inline Markdown link next to a value, e.g.
-  `| Designer | Mathias Wigger [↗](https://boardgamegeek.com/boardgame/342942) |`
+- ALSO FORBIDDEN: arrow/icon link suffixes like `[↗](url)`, `[🔗](url)`,
+  `[link](url)` next to values. Just use the value name as the link text.
+- ALLOWED: ONE inline Markdown link where the link text is the value itself,
+  e.g. `| Designer | [Mathias Wigger](https://boardgamegeek.com/boardgame/342942) |`
   or `Durata: 90–150 min ([BGG](https://...))`.
 - At most ONE link per row in tables, never duplicate the same URL.
 
@@ -340,14 +342,12 @@ def chat(user_message: str, history: list[dict] | None = None,
             for b in resp.blocks:
                 if not isinstance(b, TextBlock):
                     continue
-                text = b.text
-                # Anthropic citation (web_search): append a compact link so
-                # the snippet has a source even after the JSON round-trip.
-                if b.citations:
-                    url = b.citations[0].get("url")
-                    if url:
-                        text = f"{text.rstrip()} [↗]({url})"
-                text_parts.append(text)
+                # NOTE: we no longer append `[↗](url)` for Anthropic
+                # citations. The model is taught to write inline links itself
+                # (the link text is the value, not an arrow icon). Web search
+                # is also Tavily-backed now, so citation handling is uniform
+                # across providers — the model's prose carries the URLs.
+                text_parts.append(b.text)
             return "\n".join(text_parts).strip(), history
 
         # Execute each tool_use block and feed results back via the provider's
