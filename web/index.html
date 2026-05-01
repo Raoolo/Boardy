@@ -174,13 +174,30 @@
 
   function rerender() {
     chat.innerHTML = '';
+    // History is stored in whichever provider's native format wrote it.
+    // Anthropic: assistant.content is an array of blocks (text/tool_use).
+    // OpenAI/DeepSeek/Ollama: assistant.content is a string; tool_calls live
+    // in turn.tool_calls; tool results are separate role='tool' entries we skip.
+    // A conversation may even contain BOTH shapes if the provider was switched
+    // mid-thread, so we accept either per-turn.
     for (const turn of history) {
       if (turn.role === 'user' && typeof turn.content === 'string') {
+        // Anthropic packs tool_results as role=user content=[{type:'tool_result',...}].
+        // Those have non-string content and we want to skip them — the typeof
+        // check above already does that.
         addBubble(turn.content, 'user');
-      } else if (turn.role === 'assistant' && Array.isArray(turn.content)) {
-        const text = turn.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+      } else if (turn.role === 'assistant') {
+        let text = '';
+        if (Array.isArray(turn.content)) {
+          // Anthropic shape
+          text = turn.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+        } else if (typeof turn.content === 'string') {
+          // OpenAI shape — empty string when the turn was a pure tool call
+          text = turn.content.trim();
+        }
         if (text) addBubble(text, 'bot');
       }
+      // role==='tool' (OpenAI tool results) is intentionally not rendered.
     }
     chat.scrollTop = chat.scrollHeight;
   }
