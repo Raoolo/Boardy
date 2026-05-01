@@ -9,7 +9,7 @@ For long-form rationale see `secondbrain/memo-boardy-future.md`.
 - [x] FastAPI + Anthropic tool-use chat (Sonnet 4.6 default).
 - [x] Server-side conversation persistence + dropdown switcher in UI.
 - [x] Star-schema refactor (games dim + designers/publishers/categories/mechanics outrigger dims via bridges; sleeve facts).
-- [x] Web search restricted to trusted board-game domains; citations as inline links.
+- [x] Web search: client-side `web_search` tool (Tavily) with trusted-domain allowlist — provider-agnostic.
 - [x] `add_game` / `update_game` / `delete_game` / `set_sleeve_requirements` tools with user-confirmation flow.
 - [x] Rulebook RAG: pypdf parsing, local sentence-transformers embeddings, brute-force cosine search, page-cited answers.
 - [x] Drag-and-drop PDF upload with autocomplete game picker.
@@ -18,13 +18,17 @@ For long-form rationale see `secondbrain/memo-boardy-future.md`.
 - [x] Audit log `changes(...)` + integration in all write tools (memo §8). New tool `recent_changes` for the model.
 - [x] Delta-based inventory tool `add_to_inventory(width, height, delta, brand?)`.
 - [x] System prompt teaches `add_to_inventory` vs `update_inventory` and `recent_changes` for history Qs.
+- [x] Pluggable LLM providers (`app/llm.py`): Anthropic + OpenAI-compatible (Ollama/DeepSeek). DeepSeek-chat is the new default — ~10× cheaper than Sonnet.
+- [x] Local LLM via Ollama — **archived 2026-04-29**. Provider lives on but disabled in practice: hardware (AMD APU, shared RAM, no NPU support in Ollama) + 7B tool-use quality both insufficient. Re-open only with dGPU or a stronger small model. See `LEARNINGS.md` 2026-04-29 (PM) + `secondbrain/memo-boardy-future.md` §1.
+- [x] Sleeve schema v3 (2026-04-29 PM): drop `sleeve_raw`, collapse `'no'`→`'na'`, `sleeve_requirements` reinterpreted as TODO list (rows only for non-sleeved games), cascade-clear in `update_game`, guard rule in `set_sleeve_requirements`. Idempotent migration in `app/schema.py`.
+- [x] Import bug fix (2026-04-29 PM): `classify_sleeve` defaulted numeric-only Excel cells to `sleeved` — fixed to `unknown`. 5 games restored from audit log via `etl/fix_misclassified_sleeve.py`.
+- [x] Tagged stdout logging of every tool-use round (`[boardy] conv=… round=… …`) for live debugging from the uvicorn terminal.
+- [x] Web search reads FULL page (Tavily `raw_content` + `search_depth=advanced` defaults). Snippet was wrong on BGG/sleeveyourgames; full page text fixes it. (2026-05-01)
+- [x] Counting bug: list-returning tools now wrap as `{count, items}` so the model transcribes the integer instead of estimating list length. Header/list mismatch ("28 giochi" with list of 29) eliminated. (2026-05-01)
 
 ## 🔴 High priority
-- [ ] **Local LLM via Ollama: in progress, two open issues** (resume here next session). Provider abstraction is done in `app/llm.py` (`AnthropicProvider` + `OllamaProvider`), `LLM_PROVIDER=ollama` works end-to-end, slim prompt + Modelfile (`boardy-qwen.Modelfile` with `num_ctx=8192`, `temperature=0.3`) confirmed live (`ollama ps` shows CONTEXT 8192). BUT:
-  - **Inference too slow** — 100% CPU on Ryzen AI 7 PRO 350 + Radeon 860M. The iGPU (RDNA3.5) should be usable via Vulkan/ROCm but Ollama Windows + AMD APU support is patchy. Investigate: does `ollama` log mention GPU detection? Try setting `OLLAMA_NUM_GPU=999` or test with the Vulkan backend. Fallback if no GPU path: live with CPU latency or downsize to 3B (quality drop), or upsize hardware (NPU not yet supported by Ollama as of 2026-04).
-  - **Output quality below threshold** — Qwen2.5 7B drifts: scarce summaries when tools return rich JSON, tool-call regressions emitted as chat text (`["$sleeve_summary", {}]`) even within 8192 ctx. Two paths: (a) bump to `qwen2.5:14b-instruct` via a parallel Modelfile (~9 GB, fits 32 GB), (b) add few-shot examples of "good answers" to the slim prompt teaching it to verbalize the JSON returned by `sleeve_summary` etc. Try (b) first — cheaper.
 - [ ] **AI-ready: embeddings on `games.description`** for semantic search ("ho voglia di un gioco di esplorazione spaziale"). Reuse the rulebooks embedding pipeline; one pass when description is set/updated. (memo §8)
-- [ ] **Frontend citation polish** — the `[↗](url)` suffix is ugly; convert text-block citations into superscript footnotes with a sources panel at the bottom of each bot bubble. Backend already passes citations in the `assistant.content[].citations` blocks; wire them in `web/index.html`.
+- [ ] **Frontend citation polish** — the `[↗](url)` suffix is ugly; convert text-block citations into superscript footnotes with a sources panel at the bottom of each bot bubble. Now that web_search is client-side (Tavily), the citation source is `web_search` tool results, not Anthropic's `assistant.content[].citations` — adapt accordingly.
 
 ## 🟡 Medium priority
 - [ ] **Library v2: thumbnail grid view** — toggle on `/library` between the current dense table and a card grid (cover from `thumbnail_url`, name, players, duration, weight). Useful for visual browsing; the table stays the default for filtering/sorting.

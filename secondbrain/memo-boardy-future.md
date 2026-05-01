@@ -1,12 +1,12 @@
 # Boardy — Future Improvements Memo
 
-Last updated: 2026-04-29
+Last updated: 2026-05-01
 
 This file captures ideas you've shared that are out of scope for the current build but worth coming back to. When you ask "how can I improve Boardy?", start here.
 
 ---
 
-## Status snapshot (2026-04-29)
+## Status snapshot (2026-05-01)
 
 - ✅ §4 "Auto-fill missing fields" — shipped via `etl/backfill_bgg.py` (Haiku) and
   then rebuilt as `etl/bgg_api.py` + `etl/backfill_v2.py` (deterministic XML
@@ -20,82 +20,98 @@ This file captures ideas you've shared that are out of scope for the current bui
   auto-logged with `source` propagated from `chat:{conversation_id}` /
   `backfill_v2` / etc.). New tools `add_to_inventory` (delta-based) and
   `recent_changes` (read the log) are wired into the chat.
-- 🟡 §1 "Self-host LLM" — **half-shipped 2026-04-29**: provider abstraction
-  in `app/llm.py`, working OllamaProvider with `boardy-qwen` Modelfile
-  (Qwen2.5 7B, num_ctx 8192). Two open issues block production switch —
-  CPU-only inference is slow, 7B output quality drifts. See §1 below.
-- 🟡 §8 "Embeddings on description" — still open, second on the High-priority TODO.
+- ✅ §1 "Self-host LLM" — **archived 2026-04-29 PM**. Provider abstraction lives on
+  and now hosts a third backend (DeepSeek), but local Ollama is shelved until
+  hardware or models change. See §1 below for the post-mortem.
+- ✅ Provider switch: **DeepSeek-chat** is the new default (~10× cheaper than
+  Sonnet 4.6) via the OpenAI-compatible endpoint, reusing OllamaProvider's
+  translation layer. Web search is now a **client-side Tavily tool**
+  (`app/tools.py:web_search`) — provider-agnostic, replaces Anthropic's
+  server-side `web_search_20250305`.
+- ✅ Sleeve schema v3 (2026-04-29 PM): `sleeve_raw` dropped, `'no'`→`'na'`,
+  `sleeve_requirements` is now a TODO list (rows only for non-sleeved games),
+  with cascade + guard enforcing the invariant.
+- 🟡 §8 "Embeddings on description" — still open, top of the High-priority TODO
+  after the prompt-verification task.
+- 🟡 **Anti-hallucination prompt verification** — new in TODO. The 2026-04-29
+  rules ("header count = len(list_below)", "always `list_games()` with no
+  filters for full-collection queries") are untested in practice.
 
 ---
 
-## 1. Replace Claude API with a self-hosted free LLM  🟡 *in progress (2026-04-29)*
+## 1. Replace Claude API with a self-hosted free LLM  ✅ *archived (2026-04-29 PM)*
 
-**Goal you stated:** stop paying per-token, eventually run "on an Arduino" so Boardy is a fully offline, self-contained appliance.
+**Decision:** local Ollama path is **shelved** until hardware or models change.
+Anthropic Sonnet was replaced with **DeepSeek-chat** (hosted, OpenAI-compatible,
+~10× cheaper than Sonnet 4.6) — the cost pressure is gone, so the local path
+is no longer urgent. Code preserved: `app/llm.py` still exposes
+`OllamaProvider` and the `boardy-qwen.Modelfile` + `test_local.py` stay in the
+repo. Re-enable with `LLM_PROVIDER=ollama` in `.env` if conditions change.
 
-**Reality check on hardware:**
+**Reality check on hardware (still true):**
 - A classic Arduino (AVR/ATmega328, 32 KB flash, 2 KB RAM) **cannot host an LLM**. Not even a tiny one. The smallest practical LLMs need at least ~1 GB of RAM and tens of GB/s of memory bandwidth.
 - "Arduino-like" boards that *can* run small LLMs reasonably:
   - **Raspberry Pi 5** (8 GB) — runs 3B–7B Q4 models at 1–5 tok/s via `llama.cpp` / Ollama.
   - **NVIDIA Jetson Orin Nano** — GPU-accelerated, 7B at usable speed.
   - **Orange Pi 5 / Rock 5B** (RK3588, 16 GB) — best Pi-class option, has NPU.
   - Mac Mini M4 — overkill but trivially fast for 8B–14B models, low idle power.
-- For now: run on the laptop you already have. Arduino-class hardware is a separate project.
 
-**Status (2026-04-29):**
-The infra side is **done**. `app/llm.py` exposes a clean `Provider` interface
-with `AnthropicProvider` (default) and `OllamaProvider` (Ollama at
-`http://localhost:11434/v1`). Schema translation between Anthropic's
-`input_schema` shape and OpenAI's `function.parameters` is a one-liner
-inside the provider. Conversations recorded under one provider keep working
-when you switch to the other — `_history_to_openai` translates Anthropic
-content blocks on the fly. Switch with `LLM_PROVIDER=ollama` in `.env`.
+### Why we shelved it (numbers measured on HP ZBook G1a)
 
-**Two issues block making Ollama the default:**
+Hardware: Ryzen AI 7 PRO 350 + Radeon 860M (iGPU, RDNA 3.5) + 32 GB RAM.
 
-1. **CPU-only inference.** Hardware: Ryzen AI 7 PRO 350 + Radeon 860M iGPU,
-   32 GB RAM. Ollama loads the model at "100% CPU" — the iGPU (RDNA 3.5)
-   isn't being engaged automatically. AMD APU support on Windows is patchy
-   in Ollama 2026; Vulkan backend or `OLLAMA_NUM_GPU` may help. NPU on the
-   350 is not yet supported by Ollama. Worst-case acceptable: live with the
-   CPU latency for personal use; first turn ~60s, subsequent ~15-30s.
+| Config | Eval rate | Note |
+|---|---|---|
+| Vulkan iGPU + flash_attn | 5.54 tok/s | GPU at 100% but slower than CPU |
+| **CPU + flash_attn** | **5.74 tok/s** | Marginally faster — chosen baseline |
+| End-to-end "quante buste mi mancano?" | **254 seconds** | tool-loop + prefill |
 
-2. **Quality drift on 7B.** Tested with `boardy-qwen` (derived from
-   `qwen2.5:7b-instruct` with `num_ctx=8192`, `temperature=0.3` via Modelfile).
-   In a focused tool-routing benchmark (`test_local.py`) it scored 6/6 — the
-   model picks the right tool with the right arguments. But in real chat
-   it drifts:
-   - **Output verbosity collapse** — `sleeve_summary` returns rich JSON,
-     model summarizes to one sentence missing per-size detail.
-   - **Tool-call-as-text regression** — even within ctx, occasionally
-     prints `["$sleeve_summary", {}]` as chat text instead of using the
-     structured channel.
-   Try in order: (a) **few-shot examples** in the slim system prompt to
-   teach the verbose-summary pattern (cheap, ~200 extra tokens, might fix
-   both symptoms); (b) **upgrade to `qwen2.5:14b-instruct`** via a parallel
-   Modelfile (~9 GB Q4, fits 32 GB with headroom). The 7B → 14B jump for
-   tool-use quality is meaningful; speed drops moderately because the
-   bottleneck is memory bandwidth not compute.
+**Structural insight:** AMD iGPU shares RAM with the CPU — no dedicated VRAM,
+no bandwidth advantage on memory-bound 7B Q4 inference. So CPU vs iGPU is a
+wash on this hardware. The 50 TOPS XDNA NPU is **not used by Ollama**; would
+require AMD Ryzen AI Software / Lemonade SDK as a separate project.
 
-**What we learned this session (worth remembering):**
-- **Ollama OpenAI-compat ignores `extra_body.options`** — `num_ctx`, `keep_alive`,
-  etc. passed via the OpenAI SDK do not reach Ollama. Bake them into a
-  Modelfile (`boardy-qwen.Modelfile` in repo root) instead.
-- **Context overflow ⇒ silent regression.** With Boardy's full prompt + 16
-  tool schemas you exceed the 4096 default; Ollama doesn't error, the model
-  just starts emitting garbage and tool-calls-as-text. Always check `ollama ps`
-  for the actual loaded `CONTEXT`.
-- **Slim prompt for local mode.** CPU prefill at ~30 tok/s makes every
-  prompt token cost ~30ms. Cut from ~3000 to ~470 tokens by keeping only
-  the routing-critical rules (sleeve slang, add vs update inventory,
-  ask_rules for rules questions, refusal to invent metadata).
-- **Backwards-compat history is the trick that keeps both providers usable.**
-  Don't normalize stored history — translate at the boundary inside the
-  provider that needs OpenAI shape.
+**Quality side:** Qwen2.5 7B Q4 at `num_ctx=8192` regresses on tool-use:
+- Emits tool calls as literal text (`[tool_call sleeve_summary()]`).
+- Few-shot examples written with `[tool_call X → {…}]` pseudocode markers
+  **made it worse** — the model imitated the markers. Lesson kept in
+  LEARNINGS: never use bracket-pseudocode in few-shots for small models.
+- Jump to 14B (~9 GB Q4) not attempted — fits in 32 GB but ~3 tok/s is
+  unusable. Would need a 32B+ on a stronger machine for serious tool use.
 
-**If neither path works on this laptop:** fall back to a **prompt-only**
-mode: stuff the DB (~56 games) directly into the system prompt as a JSON
-blob, drop all tools. Loses `update_inventory` and history queries; gains
-reliability since there's no tool-call format to regress to.
+### What lives on (the parts that paid off)
+
+- **Provider abstraction in `app/llm.py`** — survived and absorbed a third
+  provider (DeepSeek) with zero changes to `Provider` ABC. `OllamaProvider`
+  is now the parent class for all OpenAI-compatible backends.
+- **Backwards-compat history translation.** A conversation started under
+  Anthropic continues correctly when switched to DeepSeek/Ollama and back —
+  `_history_to_openai` handles both content shapes.
+- **Modelfile lesson.** Ollama OpenAI-compat ignores `extra_body.options`
+  (`num_ctx`, `keep_alive`, etc.); bake them into a Modelfile instead.
+
+### When to re-open
+
+- Hardware change: dGPU NVIDIA with dedicated VRAM, or laptop with a working
+  Ryzen AI stack in Ollama.
+- New small model with tool-use that doesn't regress (Llama 4 small, Qwen3,
+  …). The bar is "no tool-call-as-text regressions, even at 8K ctx".
+- Cost pressure on DeepSeek (very unlikely — Boardy budget is ~$0.10/month).
+
+## 1b. Provider economics, post-DeepSeek
+
+**Current default:** `LLM_PROVIDER=deepseek`, `LLM_MODEL=deepseek-chat`.
+- **DeepSeek-chat:** ~$0.27/M input, ~$1.10/M output. ~10× cheaper than
+  Sonnet 4.6.
+- **Tavily** (web_search backend): 1000 ricerche/mese **free**;
+  ~$4 / 1000 ricerche oltre la soglia. Boardy uses ≤5 per query, easy to
+  stay under.
+- **Net personal-use cost:** ~$0.10/month. DeepSeek is the new pragmatic
+  baseline.
+
+**If Tavily quota becomes a problem:** the `web_search` tool is
+provider-agnostic. Swap the implementation in `app/tools.py:web_search` for
+Brave Search or self-hosted SearXNG; tool schema unchanged.
 
 ## 2. Voice input
 
@@ -199,6 +215,38 @@ The v2 schema is structured and tool-queryable but not "fully AI-ready" in the R
   - Source values in use: `chat:{conversation_id}` (auto), `backfill_v2`, `manual`, `unknown`. ETL writes (`import_excel.py`) intentionally bypass the log because that script is destructive bulk-reset by design.
   - Read access: tool `recent_changes(limit, table?, game_name?)` — Sonnet now consults this for "quando ho aggiunto X?" / "cosa è cambiato di Y?" instead of guessing.
   - Future polish: a `/changes` page in the UI for browsing without going through chat (low priority — SQL ad-hoc works for now).
+
+## 8b. Anti-hallucination prompt — verification pending
+
+The 2026-04-29 PM session added two new rules to the system prompt:
+
+1. **"For full-collection queries, always call `list_games()` with NO
+   filters first."** Prior tool results in the same conversation are
+   subsets, not totals. The model must not enumerate the full collection
+   from memory.
+2. **"The number you write in a header MUST equal `len(list_below)`."**
+   Count by enumeration, never from memory; if the header count and the
+   list disagree, the output is wrong.
+
+Both rules are written but **untested**. The bug they target was observed
+on Sonnet (header said "5 to_sleeve", list had 6 items) and may need a
+different fix on DeepSeek (different tokenizer, different attention
+patterns). Verification plan:
+
+- Run a small batch of full-collection queries: "dammi la situazione della
+  mia collezione", "raggruppa per sleeve_status", "quanti giochi ho per
+  designer?".
+- Check that (a) `list_games()` is called without filters first, (b) every
+  numeric header matches its associated list length, (c) no group is
+  silently dropped.
+
+If it still drifts, escalation order:
+- Add a single concrete few-shot example ("User: quanti giochi ho? →
+  Boardy: [calls list_games()] → 56 giochi totali. …").
+- Split the count rule into a "Before answering, COUNT BY ENUMERATING"
+  preamble, repeated near the top of the prompt.
+- As last resort, post-process the model output server-side: regex header
+  counts vs list length, flag mismatches before sending to the UI.
 
 ## 9. Quality-of-life
 

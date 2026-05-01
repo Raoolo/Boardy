@@ -123,8 +123,14 @@ def list_games(
     category_contains: str | None = None,
     mechanic_contains: str | None = None,
     limit: int = 100,
-) -> list[dict]:
-    """Return matching games. Filters AND-combined; *_contains are case-insensitive substring."""
+) -> dict:
+    """Return matching games as `{count, items}`. Filters AND-combined; *_contains are case-insensitive substring.
+
+    The `count` envelope is intentional: LLMs are bad at counting list elements
+    in attention. Returning the integer pre-computed lets the model transcribe
+    the literal instead of estimating, which has caused header/list mismatches
+    in past sessions (LEARNINGS 2026-04-29 PM).
+    """
     sql = "SELECT DISTINCT g.* FROM games g"
     params: list[Any] = []
     where: list[str] = []
@@ -155,7 +161,8 @@ def list_games(
 
     with get_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
-        return [_row_to_game_dict(r, conn, full=False) for r in rows]
+        items = [_row_to_game_dict(r, conn, full=False) for r in rows]
+        return {"count": len(items), "items": items}
 
 
 def get_game(name: str) -> dict | None:
@@ -379,8 +386,8 @@ def set_sleeve_requirements(name: str, requirements: list[dict],
     return {"ok": True, "name": name, "rows": len(requirements)}
 
 
-def sleeve_summary() -> list[dict]:
-    """Per sleeve size: needed (sum across games), owned (inventory), to_buy."""
+def sleeve_summary() -> dict:
+    """Per sleeve size: needed (sum across games), owned (inventory), to_buy. Returns `{count, items}`."""
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -402,15 +409,17 @@ def sleeve_summary() -> list[dict]:
             ORDER BY to_buy DESC, needed DESC
             """
         ).fetchall()
-    return [dict(r) for r in rows]
+    items = [dict(r) for r in rows]
+    return {"count": len(items), "items": items}
 
 
-def list_inventory() -> list[dict]:
+def list_inventory() -> dict:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT width_mm, height_mm, count_owned, brand FROM sleeve_inventory ORDER BY width_mm, height_mm"
         ).fetchall()
-    return [dict(r) for r in rows]
+    items = [dict(r) for r in rows]
+    return {"count": len(items), "items": items}
 
 
 def update_inventory(width_mm: float, height_mm: float, count_owned: int,
@@ -508,19 +517,19 @@ def add_to_inventory(width_mm: float, height_mm: float, delta: int,
 
 
 def recent_changes(limit: int = 20, table: str | None = None,
-                   game_name: str | None = None) -> list[dict]:
+                   game_name: str | None = None) -> dict:
     """Read the audit log: last N writes, optionally filtered by table or by game.
 
-    `game_name` filters changes affecting the named game (resolves to its id and
-    looks at table_name='games' rows for that id, plus sleeve_requirements rows
-    keyed by the same game_id).
+    Returns `{count, items}`. `game_name` filters changes affecting the named
+    game (resolves to its id and looks at table_name='games' rows for that id,
+    plus sleeve_requirements rows keyed by the same game_id).
     """
     with get_conn() as conn:
         if game_name:
             row = conn.execute("SELECT id, name FROM games WHERE LOWER(name)=LOWER(?)",
                                (game_name,)).fetchone()
             if not row:
-                return [{"error": f"Game {game_name!r} not found"}]
+                return {"error": f"Game {game_name!r} not found"}
             gid = row["id"]
             rows = conn.execute(
                 """SELECT id, ts, table_name, row_id, row_label, action, field,
@@ -542,8 +551,9 @@ def recent_changes(limit: int = 20, table: str | None = None,
                         except (_json.JSONDecodeError, TypeError):
                             pass
                 out.append(d)
-            return out
-        return audit.recent(conn, limit=limit, table=table)
+            return {"count": len(out), "items": out}
+        items = audit.recent(conn, limit=limit, table=table)
+        return {"count": len(items), "items": items}
 
 
 def ingest_rulebook(game_name: str, pdf_path: str) -> dict:
@@ -569,27 +579,52 @@ def ask_rules(game_name: str, question: str, k: int = 5) -> dict:
     return {"game": game_name, "question": question, "chunks": chunks}
 
 
-def list_rulebooks() -> list[dict]:
-    """List all ingested rulebooks (one row per game+source)."""
+def list_rulebooks() -> dict:
+    """List all ingested rulebooks (one row per game+source). Returns `{count, items}`."""
     from . import rulebooks
-    return rulebooks.list_rulebooks()
+    items = rulebooks.list_rulebooks()
+    return {"count": len(items), "items": items}
 
 
 def web_search(query: str, include_domains: list[str] | None = None,
-               max_results: int = 5, search_depth: str = "basic") -> dict:
-    """Tavily-backed web search. Returns top results as {title, url, content}.
+               max_results: int = 5, search_depth: str = "advanced",
+               include_raw_content: bool = True,
+               raw_content_chars: int = 6000) -> dict:
+    """Tavily-backed web search. Returns top results with FULL-PAGE content.
 
-    The tool is provider-agnostic: it works the same with Anthropic, DeepSeek,
-    or Ollama. For board-game queries, Tavily's `include_domains` restricts
-    results to trusted sources (BGG, sleevegeeks, sleeveyourgames, publishers).
+    By default uses `search_depth='advanced'` and `include_raw_content=True`,
+    so each result carries `raw_content` (the actual page text, markdown-
+    cleaned) — not just the SERP-style snippet. This is what you want for
+    BGG metadata or sleeveyourgames mm sizes; the snippet alone often hides
+    the structured data the page is showing.
+
+    Cost: advanced search = 2 Tavily credits/query; raw_content adds ~10×
+    response tokens. Boardy budget (≤5 calls/turn × ≤10 results) stays
+    well under the 1000 free credits/month — fine for personal use.
+
+    Args:
+        query: search string. Use ENGLISH game names.
+        include_domains: restrict to specific sites. Default: trusted BGG /
+            sleeve / publisher allowlist.
+        max_results: 1-10. Default 5.
+        search_depth: 'basic' (snippet only, 1 credit) or 'advanced'
+            (deeper extraction + better raw_content, 2 credits). Default
+            'advanced'.
+        include_raw_content: if True, each result carries `raw_content`
+            (full page text). Default True.
+        raw_content_chars: cap per-result raw_content length to avoid
+            blowing up the model context. Default 6000 chars (~1.5K tokens).
+            Set to 0 for no cap.
 
     USAGE NOTES (the model should follow these):
     - Use the ENGLISH game name. International sites (sleeveyourgames.com, BGG)
       do not index Italian titles. "Ali Spiegate" → "Wingspan".
-    - For sleeve-size lookups, narrow with
-      `include_domains=["sleeveyourgames.com"]` and query "<game> sleeves".
-    - For BGG metadata, use the default allowlist and query
-      "<game> boardgame BGG".
+    - For sleeve-size lookups: include_domains=['sleeveyourgames.com'],
+      query '<game> sleeves'. The advanced extraction usually captures the
+      mm size table directly.
+    - For BGG metadata: default allowlist + query '<game> boardgame BGG'.
+      Read raw_content for designer/publisher/weight/rating, not just the
+      title or snippet.
     - Cite sources INLINE as Markdown links pulled from the `url` field —
       no "Fonti:" sections (the post-processor mangles them).
     """
@@ -605,7 +640,8 @@ def web_search(query: str, include_domains: list[str] | None = None,
     domains = include_domains if include_domains is not None else DEFAULT_TRUSTED_DOMAINS
     k = max(1, min(int(max_results), 10))
     if search_depth not in ("basic", "advanced"):
-        search_depth = "basic"
+        search_depth = "advanced"
+    cap = max(0, int(raw_content_chars))
 
     try:
         resp = TavilyClient(api_key=api_key).search(
@@ -614,25 +650,38 @@ def web_search(query: str, include_domains: list[str] | None = None,
             max_results=k,
             search_depth=search_depth,
             include_answer=False,
+            include_raw_content=include_raw_content,
         )
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
+    results = []
+    for r in resp.get("results", []):
+        item = {
+            "title": r.get("title"),
+            "url": r.get("url"),
+            "content": r.get("content"),  # SERP-style snippet (kept for compat)
+        }
+        if include_raw_content:
+            raw = r.get("raw_content") or ""
+            if cap and len(raw) > cap:
+                raw = raw[:cap] + f"\n…[truncated, {len(r['raw_content']) - cap} more chars]"
+            item["raw_content"] = raw
+        results.append(item)
+
     return {
         "query": query,
         "domains_used": domains,
-        "results": [
-            {"title": r.get("title"), "url": r.get("url"),
-             "content": r.get("content")}
-            for r in resp.get("results", [])
-        ],
+        "search_depth": search_depth,
+        "raw_content_included": include_raw_content,
+        "results": results,
     }
 
 
-def list_dimension(table: str) -> list[dict]:
-    """List unique values of a dimension table with their game count."""
+def list_dimension(table: str) -> dict:
+    """List unique values of a dimension table with their game count. Returns `{count, items}`."""
     if table not in {"designers", "publishers", "categories", "mechanics"}:
-        return [{"error": f"unknown dimension {table!r}"}]
+        return {"error": f"unknown dimension {table!r}"}
     bridge = next(b for b, (d, _) in DIM_TABLES.items() if d == table)
     fk = DIM_TABLES[bridge][1]
     with get_conn() as conn:
@@ -641,7 +690,8 @@ def list_dimension(table: str) -> list[dict]:
                 FROM {table} d LEFT JOIN {bridge} b ON b.{fk}=d.id
                 GROUP BY d.id ORDER BY games DESC, d.name"""
         ).fetchall()
-    return [dict(r) for r in rows]
+    items = [dict(r) for r in rows]
+    return {"count": len(items), "items": items}
 
 
 # ===== Tool schemas =====
@@ -678,7 +728,10 @@ _LIST_FIELDS = {
 TOOLS = [
     {
         "name": "list_games",
-        "description": "List games with optional filters (substring, AND-combined). Up to 100 results.",
+        "description": ("List games with optional filters (substring, AND-combined). "
+                        "Up to 100 results. Returns `{count, items}` — ALWAYS use the "
+                        "`count` field for any number you write (headers, summaries). "
+                        "Never re-estimate by looking at items."),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -870,6 +923,10 @@ TOOLS = [
             "Search the web for board-game info NOT in the local DB or rulebook index. "
             "Backed by Tavily; pre-filtered to trusted domains (BGG, sleevegeeks, "
             "sleeveyourgames, publishers, Wikipedia). "
+            "Each result carries `raw_content` — the FULL page text, not just a SERP "
+            "snippet — so you can read structured data (BGG weight/rating/players, "
+            "mm sleeve sizes) directly. ALWAYS read `raw_content` for facts; use "
+            "`content` (the snippet) only as a quick relevance check. "
             "USE FOR: sleeve sizes ('<game> sleeves' on sleeveyourgames.com), BGG "
             "metadata when adding/updating a game ('<game> boardgame BGG'), publisher "
             "errata. DO NOT USE FOR: rules questions (use ask_rules), inventory math, "
@@ -895,7 +952,25 @@ TOOLS = [
                 "search_depth": {
                     "type": "string",
                     "enum": ["basic", "advanced"],
-                    "description": "'advanced' is slower/costlier but better for hard queries.",
+                    "description": (
+                        "'advanced' (default) does deeper extraction and better "
+                        "raw_content. 'basic' is snippet-only, half the cost. Stick "
+                        "with the default unless the query is throwaway."
+                    ),
+                },
+                "include_raw_content": {
+                    "type": "boolean",
+                    "description": (
+                        "Include full-page text in each result. Default true — leave "
+                        "it on; the snippet alone is rarely enough for BGG/sleeve data."
+                    ),
+                },
+                "raw_content_chars": {
+                    "type": "integer",
+                    "description": (
+                        "Cap per-result raw_content length (chars) to control context "
+                        "size. Default 6000 (~1.5K tokens). 0 = no cap."
+                    ),
                 },
             },
             "required": ["query"],

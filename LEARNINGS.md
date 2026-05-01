@@ -5,6 +5,97 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-05-01 — Tavily raw_content + count envelope (LLMs can't count)
+
+### TL;DR
+Two surgical fixes to chat quality:
+1. **Web search now returns FULL page text**, not just SERP-style snippets.
+   `web_search` defaults flipped to `search_depth='advanced'` +
+   `include_raw_content=True`. The model reads `raw_content` (full markdown-
+   cleaned page) for facts, not the snippet.
+2. **List-returning tools now wrap results in `{"count": N, "items": [...]}`**.
+   Verified bug: the model was writing "28 giochi" in a header while the list
+   below had 29 items, even when it had just received `list[29]` from the
+   tool. The integer wasn't reachable via attention; the count envelope makes
+   the integer literal a token the model can transcribe.
+
+### The bug, in numbers
+Test query: "Dammi la situazione completa della mia collezione".
+
+DB reality: sleeved=29, to_sleeve=10, na=14, unknown=3, total=56.
+
+Before the fix:
+| Status | DB | Header | List items |
+|---|---|---|---|
+| sleeved | 29 | **28 ❌** | 29 |
+| to_sleeve | 10 | 10 | 10 |
+| na | 14 | **15 ❌** | 14 |
+| unknown | 3 | 3 | 3 |
+
+The off-by-one errors **cancel** (28+10+15+3=56), so the totals look right
+while two headers are wrong. Classic LLM backsolve under a soft "must total
+N" constraint. The model had `list[29]` literally in its tool result,
+*and still wrote 28*.
+
+After the fix (same query, second run): every header matches the DB.
+
+### Root cause analysis (worth keeping)
+The "anti-hallucination" rule "header MUST equal len(list_below)" doesn't
+work because **LLMs can't reliably count list elements in attention**. They
+estimate. Counting tokens is the same family of problem as counting letters
+in a word — well-known weakness.
+
+The fix is structural: don't ask the model to count, give it the count.
+`{"count": 29, "items": [...]}` puts the integer literal in the tool result
+where it's a single transcribe-this-token operation.
+
+### What changed in code
+- `app/tools.py` — `list_games`, `sleeve_summary`, `list_inventory`,
+  `recent_changes`, `list_dimension`, `list_rulebooks` all now return
+  `{"count": N, "items": [...]}`. No external Python callers, only the LLM
+  consumes them, so no migration needed elsewhere.
+- `app/tools.py` — `web_search` now uses `search_depth='advanced'` +
+  `include_raw_content=True` by default. New params: `include_raw_content`
+  (bool), `raw_content_chars` (int cap, default 6000 chars to control
+  context size). Each result item carries a `raw_content` field with the
+  full page text.
+- `app/chat.py` — system prompt (BASE + SLIM):
+  - Replaced "header MUST equal len(list)" rule with **"COUNT FIELD IS THE
+    TRUTH — TRANSCRIBE the `count` field verbatim, never re-estimate"**.
+  - Added "READ `raw_content`, NOT `content`" rule to the web_search
+    section, with rationale (snippet = misleading SERP excerpt; raw = full
+    page).
+  - Updated the verbalize-`sleeve_summary` example to show the new
+    `{count, items}` shape.
+- `app/chat.py:_log()` — Windows cp1252 crash fix. The arrow `→` in result
+  log lines (`result list_games → list[56]`) was raising `UnicodeEncodeError`
+  and turning chat 500. Now catches and strip-encodes; telemetry can never
+  break the chat.
+
+### Tavily numbers (one search, one game)
+For "Wingspan sleeves" with `include_domains=['sleeveyourgames.com']`:
+- `content` (snippet): "Added to your shopping list. Add Sleeve Data…" —
+  unhelpful.
+- `raw_content` (full page): structured table with mm sizes, pack counts,
+  brand models (Mayday MTL257, Paladin Gawain PALGAWCLR, Sapphire
+  SPORANGE), 57.0/57.5 × 89.0 mm. Exactly the data we want.
+
+Cost: advanced search = 2 Tavily credits/query (vs 1 for basic). Still
+fine on the 1000/month free quota for personal use.
+
+### Open follow-ups
+- **`get_game` and `ask_rules` still return un-enveloped objects.** Not
+  applied because `get_game` returns a single game (no count) and
+  `ask_rules` returns `{game, question, chunks}` where `chunks` is the
+  array. Could wrap `chunks` in `{count, items}` for symmetry, but the
+  model uses `ask_rules` differently (pick best chunk, cite page) — count
+  doesn't matter for that flow.
+- The new "TRANSCRIBE count verbatim" rule has been verified on 2 queries
+  (full collection + top-5 publishers). Watch for regressions on novel
+  query shapes (cross-product groupings, paginated results).
+
+---
+
 ## 2026-04-29 (Late PM) — DeepSeek + Tavily, sleeve schema redesign, import bug fix
 
 ### TL;DR

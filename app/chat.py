@@ -15,6 +15,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import sys
 from typing import Any
 
 from .llm import TextBlock, ToolUseBlock, get_provider
@@ -72,16 +73,17 @@ Rules:
   you didn't query. If the user asks anything that requires the FULL collection
   view (counts, "all my games", "the situation of my collection", grouping by
   status, etc.), you MUST first call `list_games()` with NO filters — that's
-  the only way to see all 56 rows. Then derive numbers from the returned list,
-  not from recall.
+  the only way to see all rows.
 - When grouping by `sleeve_status`, run ONE call per status value
   (sleeved, to_sleeve, na, unknown) and verify the totals add up to the
-  full count from `list_games()`. If they don't match, you missed a category.
-- COUNT INTEGRITY: any number you write (in a header, summary, or sentence)
-  MUST equal `len(list_you_will_show_below)`. Count by enumerating, not from
-  memory. If you write "X giochi" / "X games" and then a list with N items
-  where N ≠ X, your output is WRONG — recount before sending. This is a hard
-  rule: there is no situation where a header count and its list disagree.
+  full count. If they don't match, you missed a category.
+- COUNT FIELD IS THE TRUTH. Every list-returning tool returns
+  `{"count": N, "items": [...]}`. The `count` field is the SOURCE OF TRUTH —
+  always TRANSCRIBE it verbatim into your headers and summaries. NEVER
+  re-estimate by looking at the items. Models are bad at counting list
+  elements: writing "28 giochi" when `count: 29` is the textbook failure
+  mode. If you write "X giochi", X must equal the `count` field of the
+  tool result you're summarizing, not your guess.
 - Match the user's language: reply in Italian if they write in Italian, English otherwise.
 - For "how many sleeves to buy", call `sleeve_summary` and report by size.
 - When a sleeve size is given as e.g. "63.5x88" or "63,5x88", treat the comma as a
@@ -149,12 +151,19 @@ Web search (`web_search` tool, Tavily-backed):
   sleeveyourgames.com) don't index Italian titles. The DB stores the BGG
   canonical (English) name in `games.name`; if the user types Italian,
   resolve via `list_games(name_contains=...)` first to get the English name.
+- READ `raw_content`, NOT `content`. Each result has two text fields:
+  `content` is a SERP-style snippet (often misleading — review fragments,
+  forum thread titles, marketing blurbs). `raw_content` is the FULL page
+  text (markdown-cleaned). Always extract facts (BGG weight, rating,
+  designer, mm sleeve sizes) from `raw_content`. Use `content` only as a
+  relevance check to pick which result to read.
 - SLEEVE SIZES: query `"<game> sleeves"` with
-  `include_domains=["sleeveyourgames.com"]`. The site lists exact mm sizes
-  + counts per game. Read out values, then propose `set_sleeve_requirements`.
+  `include_domains=["sleeveyourgames.com"]`. The mm × mm size table is in
+  `raw_content` of the matching result. Propose `set_sleeve_requirements`
+  from those numbers, not from the snippet.
 - BGG METADATA (adding/enriching a game): query `"<game> boardgame BGG"`
   with default domains. Extract designer, publisher, players, duration,
-  weight, rating, bgg_id, description, thumbnail, year. Propose a table,
+  weight, rating, bgg_id, year FROM `raw_content`. Propose a table,
   ask "Confermo?", then call add_game/update_game.
 - Use SPARINGLY. NEVER for rules questions (use `ask_rules`) or anything
   the local DB can answer (sleeve math, inventory, audit log).
@@ -180,6 +189,10 @@ ALWAYS use the tools — never invent game names, counts, or sizes.
 For full-collection queries (counts, "all my games", grouping by status) call
 `list_games()` with NO filters first — prior tool results are subsets, not totals.
 Never recall or enumerate from memory.
+
+List-returning tools return `{"count": N, "items": [...]}`. ALWAYS transcribe
+the `count` field verbatim into headers — never re-estimate from the items.
+Writing "28 giochi" when `count: 29` is the bug we are preventing.
 
 Sleeve sizes: comma is decimal separator ("63,5x88" = 63.5×88). DB is in mm.
 Slang: "Standard American"=63.5×88, "Mini American"=41×63 or 44×68,
@@ -209,8 +222,11 @@ and call `ingest_rulebook(game_name, pdf_path)`.
 
 Adding/updating a game:
 - Use `web_search` (Tavily) for BGG metadata: query "<game> boardgame BGG" with
-  the ENGLISH game name. Don't invent fields not in the search results.
+  the ENGLISH game name. READ the `raw_content` field of each result for the
+  actual facts — `content` is a snippet and is usually wrong/incomplete.
+  Don't invent fields not in `raw_content`.
 - For sleeve sizes: query "<game> sleeves" with include_domains=["sleeveyourgames.com"].
+  The mm size table is in `raw_content`.
 - Propose a compact table and wait for "sì/confermo" before calling add_game/update_game.
 - Lists (designers, publishers, categories, mechanics) go as arrays of strings.
 - For deterministic bulk backfill from BGG XML API, suggest `etl/backfill_v2.py`.
@@ -223,10 +239,10 @@ lists for ≥4 items). Avoid filler ("Ecco…", "Vuoi dettagli?").
 After a tool returns JSON, write a short natural-language reply — never echo
 the JSON, never write `[tool_call ...]`, never use brackets-as-pseudocode.
 
-If `sleeve_summary` returns rows like
-  {"size":"63.5x88","needed":520,"owned":300,"to_buy":220}
-reply like: "Ti mancano **220 buste 63.5×88**." Mention sizes with `to_buy=0`
-only briefly ("per le 45×68 sei a posto").
+If `sleeve_summary` returns
+  {"count": 5, "items": [{"size":"63.5x88","needed":520,"owned":300,"to_buy":220}, …]}
+read the `items` array and reply like: "Ti mancano **220 buste 63.5×88**."
+Mention sizes with `to_buy=0` only briefly ("per le 45×68 sei a posto").
 
 If `add_to_inventory` returns {"size":"...","previous_count":N,"delta":D,"count_owned":M}
 reply like: "Aggiornato: **63.5×88** da N → **M** (+D)." Always include all three numbers.
@@ -250,8 +266,17 @@ def _log(msg: str) -> None:
     Tag `[boardy]` makes it grep-friendly and distinguishable from uvicorn's
     own access log. flush=True ensures lines appear in real time even with
     buffered stdout (Windows + cmd defaults to fully-buffered for non-TTY).
+
+    Windows note: cp1252 stdout chokes on emoji/arrows. We strip-encode
+    instead of crashing the request — telemetry must never break the chat.
     """
-    print(f"[boardy] {msg}", flush=True)
+    line = f"[boardy] {msg}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", "cp1252") or "cp1252"
+        print(line.encode(enc, errors="replace").decode(enc, errors="replace"),
+              flush=True)
 
 
 def _summarize_args(args: dict | None) -> str:
