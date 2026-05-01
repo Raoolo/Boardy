@@ -32,10 +32,14 @@ This file captures ideas you've shared that are out of scope for the current bui
   `sleeve_requirements` is now a TODO list (rows only for non-sleeved games),
   with cascade + guard enforcing the invariant.
 - 🟡 §8 "Embeddings on description" — still open, top of the High-priority TODO
-  after the prompt-verification task.
-- 🟡 **Anti-hallucination prompt verification** — new in TODO. The 2026-04-29
-  rules ("header count = len(list_below)", "always `list_games()` with no
-  filters for full-collection queries") are untested in practice.
+  now that the prompt and dashboard work landed.
+- ✅ §7 "Inventory editing UI" — shipped 2026-05-01 as `/sleeves`: KPI cards,
+  to-buy table, inline +/- preset buttons per inventory row, quick-add
+  form, mini-chat with its own conversation_id.
+- ✅ Anti-hallucination counting bug — root-caused 2026-05-01 as
+  "LLMs can't count list elements in attention". Fixed by wrapping
+  list-returning tools in `{count, items}` so the integer is a
+  transcribe-token instead of an estimate. Verified on 2 query shapes.
 
 ---
 

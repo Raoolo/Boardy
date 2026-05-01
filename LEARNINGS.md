@@ -5,6 +5,54 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-05-01 (PM) — `/sleeves` dashboard + frontend rerender bug
+
+### TL;DR
+New page `/sleeves` consolidates the inventory workflow that previously
+lived only in chat. Three sections: KPI cards, "Da comprare" table from
+`sleeve_summary`, and an inventory editor with inline +/- preset buttons
+(`-50 / -10 / +10 / +50 / +100`) per row. Plus a quick-add form and a
+mini-chat with its own `conversation_id` (localStorage key
+`boardy_sleeves_conv_id`) so sleeve-focused turns don't pollute the
+main chat. Library got a Buste status pill + filter; shared nav.
+
+### Frontend bug found along the way
+`web/index.html:rerender()` assumed Anthropic shape only
+(`assistant.content` is array of blocks). After the DeepSeek switch the
+shape became OpenAI (`content: "string"` + separate `tool_calls`) and
+the rerender silently skipped every assistant turn — reloaded
+conversations showed only user bubbles. Now accepts both shapes per
+turn so mixed-provider histories render correctly. The `/sleeves`
+mini-chat reuses the same dual-shape logic.
+
+### Server endpoints added (`app/main.py`)
+- `GET /sleeves`, `GET /sleeves/data` — read-only dashboard payload.
+- `POST /sleeves/inventory/delta` — wraps `add_to_inventory`,
+  audit-source `web:sleeves`.
+- `POST /sleeves/inventory/upsert` — wraps `update_inventory` for the
+  add-form (absolute count, useful for "ho 100 buste di X").
+- The "save" button per inventory row sends only the delta (not the
+  absolute), so the audit log records `delta=+50` etc. — matches the
+  semantics chat uses.
+
+### UX detail worth keeping
+Numeric table columns are right-aligned (digits line up by place value,
+magnitudes scan instantly: "569" sticking out left of "29" reads as
+"bigger" without parsing each number). Headers must match cell
+alignment — initial bug here was `td.right` only matching td, leaving
+headers left-aligned over right-aligned data. Fixed to `th.right,
+td.right`.
+
+### Open follow-ups
+- Mini-chat does NOT currently restrict the model to sleeve topics —
+  the same provider/system-prompt as the main chat. Felt over-engineered
+  for now; revisit if the chat strays into off-topic territory.
+- Library still doesn't show per-game sleeve sizes (only the status
+  pill). Decided against — the detail belongs on `/sleeves`. Reopen
+  only if multiple users disagree.
+
+---
+
 ## 2026-05-01 — Tavily raw_content + count envelope (LLMs can't count)
 
 ### TL;DR

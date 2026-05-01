@@ -25,6 +25,8 @@ For long-form rationale see `secondbrain/memo-boardy-future.md`.
 - [x] Tagged stdout logging of every tool-use round (`[boardy] conv=… round=… …`) for live debugging from the uvicorn terminal.
 - [x] Web search reads FULL page (Tavily `raw_content` + `search_depth=advanced` defaults). Snippet was wrong on BGG/sleeveyourgames; full page text fixes it. (2026-05-01)
 - [x] Counting bug: list-returning tools now wrap as `{count, items}` so the model transcribes the integer instead of estimating list length. Header/list mismatch ("28 giochi" with list of 29) eliminated. (2026-05-01)
+- [x] **`/sleeves` dashboard** (2026-05-01): KPI cards, "Da comprare" table, inventory with inline +/- preset buttons (`-50/-10/+10/+50/+100`), quick-add form, mini-chat with separate `conversation_id`. New endpoints `/sleeves/data`, `/sleeves/inventory/delta`, `/sleeves/inventory/upsert` (audit-source `web:sleeves`). Library got a Buste status pill column + filter; nav `Chat / Libreria / Buste` shared across pages.
+- [x] **Frontend rerender bug** (2026-05-01): `web/index.html` only rendered Anthropic-shape histories (`content` as array). DeepSeek/OpenAI shape (`content` string + separate `tool_calls`) was silently skipped → reloaded conversations showed only user bubbles. Now accepts both shapes per turn.
 
 ## 🔴 High priority
 - [ ] **AI-ready: embeddings on `games.description`** for semantic search ("ho voglia di un gioco di esplorazione spaziale"). Reuse the rulebooks embedding pipeline; one pass when description is set/updated. (memo §8)
@@ -32,7 +34,6 @@ For long-form rationale see `secondbrain/memo-boardy-future.md`.
 
 ## 🟡 Medium priority
 - [ ] **Library v2: thumbnail grid view** — toggle on `/library` between the current dense table and a card grid (cover from `thumbnail_url`, name, players, duration, weight). Useful for visual browsing; the table stays the default for filtering/sorting.
-- [ ] **Inventory editing UI** (forms, not chat). Bulk-update sleeve stock after a shopping run. (memo §7)
 - [ ] **Voice input** via Web Speech API (browser-native, free). Mic button next to "Invia"; Italian recognition is decent in Chrome. (memo §2)
 - [ ] **OCR fallback** for scanned-image rulebooks (`pytesseract`); detect zero-text pages and run OCR on those only.
 - [ ] **Chunking for tabular rulebooks** — current line-based chunker breaks HeroQuest/TI reference tables. Try a heuristic that keeps consecutive table-like lines together.
