@@ -220,6 +220,24 @@ def _migrate_v3_drop_sleeve_raw(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE games SET sleeve_status='na' WHERE sleeve_status='no'")
 
 
+def _migrate_v4_description_embedding(conn: sqlite3.Connection) -> None:
+    """v4: add description embedding columns to games (idempotent).
+
+    `description_embedding`: float32 raw bytes (e5-base = 768 dims = 3072 B).
+    `description_hash`: SHA1 of the description text used to embed; lets us
+    skip re-embedding when nothing changed.
+    `description_skip_reason`: free-text reason why automatic backfill
+    skipped this game. Cleared once the description is filled. Lets us
+    revisit the laggards later instead of re-running the whole pipeline.
+    """
+    if not _has_column(conn, "games", "description_embedding"):
+        conn.execute("ALTER TABLE games ADD COLUMN description_embedding BLOB")
+    if not _has_column(conn, "games", "description_hash"):
+        conn.execute("ALTER TABLE games ADD COLUMN description_hash TEXT")
+    if not _has_column(conn, "games", "description_skip_reason"):
+        conn.execute("ALTER TABLE games ADD COLUMN description_skip_reason TEXT")
+
+
 def migrate() -> None:
     with get_conn() as conn:
         # If `games` doesn't exist at all, nothing to do — ETL will create it.
@@ -243,5 +261,8 @@ def migrate() -> None:
         # v3: drop sleeve_raw + collapse 'no'→'na' (idempotent).
         # Must run AFTER changes table exists since it audit-logs the drop.
         _migrate_v3_drop_sleeve_raw(conn)
+
+        # v4: semantic-search columns on games.
+        _migrate_v4_description_embedding(conn)
 
         conn.commit()

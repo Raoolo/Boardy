@@ -238,6 +238,15 @@ def add_game(
         audit.log_full(conn, table="games", row_id=gid, row_label=name,
                        action="insert", snapshot=snapshot, source=_source)
         conn.commit()
+    # Auto-embed description if provided. Lazy import to keep server boot
+    # cheap — first call loads the e5 model (~3s on warm cache).
+    if description:
+        try:
+            from . import games_semantic
+            games_semantic.embed_one(gid)
+        except Exception:
+            # Embedding is best-effort; never fail an add_game on it.
+            pass
     return {"ok": True, "id": gid, "name": name}
 
 
@@ -319,6 +328,14 @@ def update_game(
         result["cleared_requirements"] = cleared
         result["note"] = (f"sleeve_status set to {sleeve_status!r}; cleared "
                           f"{cleared} pending sleeve_requirements row(s).")
+    # Auto-embed iff description was actually patched. The hash check inside
+    # embed_one makes this a no-op if the text didn't really change.
+    if description is not None:
+        try:
+            from . import games_semantic
+            games_semantic.embed_one(gid)
+        except Exception:
+            pass
     return result
 
 
@@ -678,6 +695,47 @@ def web_search(query: str, include_domains: list[str] | None = None,
     }
 
 
+def search_games_semantic(
+    query: str,
+    players: int | None = None,
+    max_complexity_weight: float | None = None,
+    min_complexity_weight: float | None = None,
+    max_duration_min: int | None = None,
+    sleeve_status: str | None = None,
+    category_contains: str | None = None,
+    mechanic_contains: str | None = None,
+    k: int = 10,
+) -> dict:
+    """Semantic search over the user's owned games via description embeddings.
+
+    Hybrid: structured SQL filters first (players / complexity / duration /
+    sleeve status / category / mechanic), then cosine on the e5-base embedding
+    of `games.description`. Games without an embedding are skipped — run
+    `etl/embed_descriptions.py` if results look thin.
+
+    Returns `{count, items}` with `score` per item (cosine similarity, 0–1).
+    """
+    from . import games_semantic
+    items = games_semantic.search_semantic(
+        query,
+        players=players,
+        max_complexity_weight=max_complexity_weight,
+        min_complexity_weight=min_complexity_weight,
+        max_duration_min=max_duration_min,
+        sleeve_status=sleeve_status,
+        category_contains=category_contains,
+        mechanic_contains=mechanic_contains,
+        k=k,
+    )
+    excluded = games_semantic.excluded_from_search()
+    return {
+        "count": len(items),
+        "items": items,
+        "excluded_count": len(excluded),
+        "excluded": excluded,
+    }
+
+
 def list_dimension(table: str) -> dict:
     """List unique values of a dimension table with their game count. Returns `{count, items}`."""
     if table not in {"designers", "publishers", "categories", "mechanics"}:
@@ -909,6 +967,46 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "search_games_semantic",
+        "description": (
+            "Semantic 'vibe' search over the user's owned games using "
+            "embeddings of `games.description`. Use for fuzzy intent queries "
+            "like 'gioco da viaggio facile per colleghi', 'qualcosa di "
+            "esplorazione spaziale', 'un party leggero', 'engine builder "
+            "leggero'. NOT for exact filters — for those use `list_games` "
+            "(name/designer/category match). NOT for rules questions (use "
+            "`ask_rules`) or sleeve/inventory/audit queries. "
+            "The `query` is a free-form Italian or English description of "
+            "what the user wants. Combine with structured filters when they "
+            "appear in the request: 'facile da imparare' → max_complexity_weight=2.5, "
+            "'in 4' → players=4, '<60 min' → max_duration_min=60. "
+            "Returns `{count, items, excluded_count, excluded}`. Each item "
+            "has a `score` (cosine, 0–1; ≥0.78 strong match for e5-base, "
+            "0.72–0.77 borderline). `excluded` lists games NOT scanned because "
+            "they lack a description embedding, with the `skip_reason` from the "
+            "last backfill attempt (e.g. ambiguous edition, no BGG match). When "
+            "`excluded_count > 0` you MUST mention this to the user — say "
+            "something like 'ti ricordo che N giochi non sono inclusi nella "
+            "ricerca semantica perché senza descrizione' and list the names "
+            "briefly. Never claim a result set is exhaustive when this is non-zero."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Free-form description of what the user wants."},
+                "players": {"type": "integer"},
+                "max_complexity_weight": {"type": "number", "description": "BGG weight upper bound (≤2.5 = light, ≤3.5 = medium)."},
+                "min_complexity_weight": {"type": "number"},
+                "max_duration_min": {"type": "integer"},
+                "sleeve_status": {"type": "string", "enum": ["sleeved", "to_sleeve", "na", "unknown"]},
+                "category_contains": {"type": "string", "description": "Substring on BGG category, e.g. 'Party Game'."},
+                "mechanic_contains": {"type": "string"},
+                "k": {"type": "integer", "description": "Top-k results (default 10)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "list_dimension",
         "description": "Browse a dimension table (with game counts). Useful: 'show me all designers I own'.",
         "input_schema": {
@@ -992,6 +1090,7 @@ TOOL_FUNCS = {
     "add_to_inventory":        add_to_inventory,
     "recent_changes":          recent_changes,
     "list_dimension":          list_dimension,
+    "search_games_semantic":   search_games_semantic,
     "ingest_rulebook":         ingest_rulebook,
     "ask_rules":               ask_rules,
     "list_rulebooks":          list_rulebooks,

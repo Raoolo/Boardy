@@ -30,6 +30,15 @@ uv run python etl/backfill_v2.py phase1                # fill missing fields for
 uv run python etl/backfill_v2.py phase2 [--auto]       # search BGG for games without bgg_id
 uv run python etl/backfill_v2.py apply --gid N --bgg X # manual id pick after phase2
 
+# Backfill BGG metadata via Tavily + DeepSeek (no BGG token needed; uses LLM extraction)
+uv run python etl/backfill_descriptions_tavily.py                # fill all games missing description
+uv run python etl/backfill_descriptions_tavily.py --only NAME    # one game by substring
+uv run python etl/backfill_descriptions_tavily.py --dry-run      # preview without writing
+
+# Embed (or re-embed) game descriptions for semantic search (run after backfill)
+uv run python etl/embed_descriptions.py            # incremental — hash-gated
+uv run python etl/embed_descriptions.py --force    # rebuild all (e.g. after model swap)
+
 # Legacy (deprecated, expensive): Haiku + web_search backfill — kept for reference only.
 # uv run python etl/backfill_bgg.py --auto
 
@@ -61,6 +70,9 @@ games (DIM)              ── designers (outrigger DIM via game_designers brid
                          ── publishers (outrigger DIM via game_publishers)
                          ── categories (outrigger DIM via game_categories)
                          ── mechanics  (outrigger DIM via game_mechanics)
+                         + description_embedding BLOB     -- e5-base, 768 float32
+                         + description_hash TEXT          -- SHA1 for re-embed gate
+                         + description_skip_reason TEXT   -- why backfill skipped
 
 sleeve_requirements (FACT, granularity = game × sleeve size)
 sleeve_inventory   (FACT, granularity = sleeve size)
@@ -115,6 +127,35 @@ Every write to `games`, `sleeve_requirements`, `sleeve_inventory` produces audit
 
 `updated_at` and `created_at` are explicitly excluded from diffs (`audit._IGNORED_FIELDS`) to avoid noisy timestamp-only rows.
 
+### Semantic search over games (`app/games_semantic.py`)
+
+Hybrid retrieval over the user's owned games:
+1. **SQL filters** narrow the candidate set: `players`, `max_complexity_weight`,
+   `min_complexity_weight`, `max_duration_min`, `sleeve_status`,
+   `category_contains`, `mechanic_contains`. Numeric filters use
+   `IS NULL OR <= X` so games missing BGG metadata still qualify on cosine.
+2. **Cosine similarity** on `games.description_embedding` (e5-base, same model
+   as the rulebook RAG via `_model_lazy()` reuse — no second 280MB download).
+3. **Skip-list awareness**: rows with `description_embedding IS NULL` are
+   filtered out from ranking but surfaced separately as `excluded` in the
+   tool result so the model can warn the user. The `description_skip_reason`
+   column carries the last backfill failure cause for each excluded game.
+
+The `embed_one(game_id)` hook is auto-called from `add_game` and `update_game`
+inside a try/except (best-effort — never fails the write). Re-embed is
+gated by `description_hash` (SHA1) — sleeve-only updates are no-ops for
+this pipeline.
+
+Backfill: `etl/embed_descriptions.py` (one-shot for all games), and
+`etl/backfill_descriptions_tavily.py` for the BGG-metadata enrichment
+that creates the descriptions in the first place. The latter writes
+`description_skip_reason` on skip and clears it on success — so a re-run
+is naturally idempotent and progresses only on the laggards.
+
+E5 score thresholds (multilingual): ≥0.78 strong match, 0.72–0.77
+borderline, <0.72 noise. Lower than English-only models because the
+multilingual backbone trades sharpness for IT/EN flexibility.
+
 ### Rulebook RAG (`app/rulebooks.py`)
 
 `ingest(game_name, pdf_path)`:
@@ -159,4 +200,6 @@ Drag-and-drop: dragging a PDF anywhere on the page opens a modal with autocomple
 - `app/schema.py` — DDL for the star schema. Add new tables here, with `CREATE TABLE IF NOT EXISTS` so `migrate()` stays idempotent.
 - `app/audit.py` — audit-log helpers. Touch when changing what we log (e.g. adding a new ignored field) or when wiring a new write path.
 - `etl/bgg_api.py` — BGG XML API2 client. Touch when BGG adds new fields we want to capture or when changing the cache strategy.
+- `etl/backfill_descriptions_tavily.py` — Tavily-based backfill (no BGG token). `EXTRACT_PROMPT` carries the strict-JSON formatting block (single-line strings, ASCII apostrophes, no curly quotes); `_try_repair_json` is the fallback for the residual DeepSeek json_object bugs. Persists `description_skip_reason` on the row so re-runs are idempotent and visible.
+- `app/games_semantic.py` — semantic-search module. Reuses `_model_lazy()` from `rulebooks.py` (single 280MB load). `excluded_from_search()` reads the rows with NULL embedding so the chat tool can warn about coverage gaps.
 - `web/index.html` — single-file UI. CSS + JS inline. No build step.

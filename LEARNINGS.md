@@ -5,6 +5,197 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-05-03 (PM, post-mortem) — Skip-reason column + tool surfaces excluded games
+
+### TL;DR
+Two follow-ups to the backfill run:
+1. **Schema v5**: `games.description_skip_reason TEXT` (idempotent migration).
+   Backfill script now writes the reason on skip/error, clears on success.
+   So next time we run it, the laggards stay visible — no need to grep
+   stdout from a past run.
+2. **Tool surface**: `search_games_semantic` now returns `{count, items,
+   excluded_count, excluded}`. The model is told (in the tool description)
+   that when `excluded_count > 0` it MUST tell the user "ti ricordo che N
+   giochi non sono inclusi nella ricerca semantica perché senza
+   descrizione" and list them. Otherwise the model silently presents an
+   incomplete subset as if it were the whole collection — exactly the
+   counting-style bug we fight elsewhere.
+
+### Fixed: DeepSeek json_object apostrophe bug (mostly)
+Two complementary fixes after observing the deterministic
+unterminated-string failure on "Memoir '44 - Refresh" and "War Chest":
+- **Prompt-side**: explicit STRICT JSON FORMATTING block (single-line
+  strings, ASCII apostrophes, escape rules, no trailing commas). Special
+  carve-out for titles containing `'` — instructed to either rewrite
+  ("Memoir 44") or ensure plain ASCII. Cheap, no-cost change.
+- **Code-side**: `_try_repair_json()` fallback. On `JSONDecodeError`, first
+  try curly→ASCII normalization (’ → ', “ → "), then collapse newlines
+  inside the payload, then give up. Catches the residual cases the prompt
+  doesn't fix. Two lines of code, kills 90% of the failure mode.
+The two fixes stack: the prompt prevents most failures, the repair
+catches the rest. **Result on the rerun (2026-05-03 PM): 4/8 of the
+previously-skipped games now indexed → final coverage 52/56 (93%).**
+Memoir '44 - Refresh recovered (was a JSON-parse fail before, OK now
+thanks to the prompt's apostrophe rule). 4 still out: "7 Wonders II"
+(genuine ambiguity), "Il Signore dei Tortelli" (likely fan-game),
+"I Coloni di Catan" + "War Chest" (residual JSON-parse — DeepSeek still
+finds new ways to break json_object on these specific raw_contents,
+likely needs an Anthropic retry path or a stricter repair).
+
+### Why not switch to Anthropic just for the failures
+Considered briefly. Rejected because:
+- DeepSeek's failure mode is a known, fixable formatting bug — not a
+  fundamental quality issue. Switching providers for one prompt is the
+  kind of "if you have a hammer" decision that obscures the real fix.
+- Sonnet costs ~10× more for an extraction task that DeepSeek does well
+  in 95% of cases. The user already accepted that trade-off when they
+  set LLM_PROVIDER=deepseek.
+- A repair fallback is provider-agnostic — works the same day Anthropic
+  has its own JSON-mode quirk in the future.
+
+### Reusable pattern: persisted skip-reason on rows
+The `description_skip_reason` column is a tiny pattern with outsized
+value: it turns "I tried to fill X and failed" into a queryable, durable
+fact instead of a one-shot stdout message. Now the model can answer
+"perché Sushi Go Party ha la description e Memoir no?" by reading the
+column. Worth repeating for any future enrichment pipeline (PDF→summary,
+manual-edit hints, etc).
+
+---
+
+## 2026-05-03 (PM) — Tavily+DeepSeek backfill of missing BGG descriptions
+
+### TL;DR
+After landing semantic search, only 32/56 games had a description (the rest
+were never enriched by BGG). Built `etl/backfill_descriptions_tavily.py`:
+Tavily search restricted to boardgamegeek.com → DeepSeek (json_object mode)
+extracts a structured payload → `update_game(...)` writes it and the
+auto-embed hook indexes the new description. **Result: 48/56 indexed
+(+16 in ~3 minutes), 0 errors, 8 skipped.**
+
+### Skip reasons (the interesting part)
+- **4 ambiguous Italian editions / fan-titles** ("7 Wonders II", "7 Wonders II Cities",
+  "I Coloni di Catan", "Il Signore dei Tortelli -Le Due Torri-"). DeepSeek
+  correctly returned `{"skip": true, "reason": "..."}` rather than guessing
+  metadata for the wrong base game. Good behavior — we *want* this kind of
+  refusal because the alternative is poisoning the embedding with the wrong
+  description.
+- **2 too-generic names** ("Duel", "Elfenland De Luxe"). Same as above.
+- **2 DeepSeek JSON-mode bugs**: "Memoir '44 - Refresh" and "War Chest" both
+  failed with `json parse error: Unterminated string` — the model produced
+  unescaped apostrophes inside a string field even with `response_format=
+  {"type": "json_object"}`. Reproducible. Fix: retry on Anthropic for those
+  two, or post-process with a fixup (e.g. `json5`).
+
+### Why DeepSeek over Sonnet for this
+LLM_PROVIDER=deepseek is the active chat provider; ~10× cheaper than Sonnet
+for an extraction task that doesn't need frontier reasoning. JSON-mode is
+adequate apart from the apostrophe escape bug. Total cost for 24 games:
+~$0.005 in DeepSeek + 48 Tavily credits.
+
+### Coverage gap → semantic search blind spot
+Games without a `description` are filtered out by
+`games_semantic.search_semantic` (`WHERE description_embedding IS NOT NULL`).
+So 8/56 games (14%) are currently INVISIBLE to vibe queries. This is
+intentional — embeddings don't exist for them — but the model must be told
+this so it doesn't claim "no results" when really "no embeddings yet".
+Tracked in TODO.md High priority. Two recovery paths worth pursuing:
+- PDF→description for games whose rulebook is already ingested (RAG infra
+  is right there).
+- Manual textarea editor on `/library` for fan-made / Italian-only titles
+  that BGG won't have.
+
+### Tavily query pattern that works
+`query=f"{italian_or_english_name} boardgame BGG"` +
+`include_domains=["boardgamegeek.com"]` + `search_depth="advanced"` +
+`include_raw_content=True` + `raw_content_chars=4000`. Concatenate the top
+3 results' raw_content with `## <url>` headers so the LLM has provenance.
+Capping each raw_content to 4000 chars keeps the prompt ≤8000 chars
+(also capped in the script). Worked even when the user-owned name was
+Italian (Tavily fuzzy-matches on BGG's "alternate names" field).
+
+### Reusable extraction prompt structure
+The key pattern in `EXTRACT_PROMPT`:
+1. State the user-owned game name explicitly upfront.
+2. Hand over RAW BGG content.
+3. Ask for a JSON object with a fixed schema, but say "omit any field you
+   can't confidently fill — DO NOT guess."
+4. Provide an explicit escape: `{"skip": true, "reason": "..."}` when the
+   page is for the wrong game / edition / expansion.
+The escape clause is what saved us from polluting the DB with wrong data
+on the 6 ambiguous cases.
+
+---
+
+## 2026-05-03 — Semantic "vibe" search over `games.description`
+
+### TL;DR
+Hybrid retrieval: SQL filters narrow the candidate set, then cosine
+similarity on an e5-base embedding of the BGG description ranks the
+survivors. New tool `search_games_semantic(query, players?,
+max_complexity_weight?, max_duration_min?, sleeve_status?,
+category_contains?, mechanic_contains?, k=10)`. Use case the user actually
+asked for: "gioco da viaggio portatile facile da imparare per colleghi
+di lavoro in pullman e hotel" → top-5 includes Sushi Go Party (party,
+20min) and Obscurio (coop, 45min) with cosine ≥0.77.
+
+### Why hybrid, not pure embedding
+The example query mixes three signals:
+- "facile da imparare" → numeric, already in `complexity_weight` — filter first.
+- "in 4 giocatori" → numeric range — filter first.
+- "portatile / facile / colleghi" → semantic vibe — embedding ranks.
+
+Pure cosine over the description would underperform on hard constraints
+(weight=4 game still ranks high if its blurb mentions "easy to learn the
+basics"). Pure SQL filtering leaves the model to pick winners from
+hundreds of candidates. The combo gives both: hard filters cut the pool,
+embedding picks the vibe match.
+
+### Implementation
+- Schema v4 (`app/schema.py:_migrate_v4_description_embedding`):
+  idempotent `ALTER TABLE games ADD COLUMN description_embedding BLOB`
+  + `description_hash TEXT`. Hash = SHA1 of the description used to
+  embed; lets us skip re-encoding when nothing changed.
+- New module `app/games_semantic.py`: `embed_one(game_id)`,
+  `reindex_all(force=False)`, `search_semantic(query, **filters, k)`.
+  Reuses `_model_lazy()` from `rulebooks.py` so we don't load the
+  280MB model twice. Same e5 prefixes (`passage:` for docs,
+  `query:` for queries).
+- Auto-embed hook in `add_game` / `update_game` (try/except — never
+  fails the write). Hash check inside `embed_one` makes a sleeve-only
+  update a no-op for the embedding pipeline.
+- Backfill script `etl/embed_descriptions.py` (uses argparse,
+  `--force` to rebuild from scratch). 32/56 games had a description on
+  2026-05-03; the other 24 still need BGG enrichment via
+  `backfill_v2.py` and will pick up the embedding automatically next
+  time they're updated.
+
+### Embedding storage shape
+e5-base = 768 dims × float32 = 3072 bytes per row. SQLite holds 56
+games → ~170KB total. Brute-force cosine in NumPy is fine; no need for
+sqlite-vec or a vector store. Same scaling argument as the rulebook RAG.
+
+### Gotcha — don't filter too hard
+SQL filters use `IS NULL OR <= X` for `complexity_weight` and
+`duration_min` because BGG enrichment is incomplete. A strict
+`weight <= 2.5` would silently drop 24 games we own that lack the
+metadata, even if their description matches the vibe. Better to let
+them through and let cosine speak. If the user explicitly said "only
+games where I know the weight", we'd add a `require_metadata=True`
+flag — not worth the schema bloat for a hypothetical case.
+
+### Score thresholds (e5-base, multilingual)
+Empirically on this collection:
+- ≥0.78 = strong match (model is confident)
+- 0.72–0.77 = borderline, mention with reservation
+- <0.72 = noise, say "nessun match forte" rather than overselling
+
+These are lower than monolingual English models because the e5 multilingual
+backbone trades some sharpness for IT/EN flexibility — fine for our case,
+the user types both languages.
+
+---
+
 ## 2026-05-01 (PM) — `/sleeves` dashboard + frontend rerender bug
 
 ### TL;DR

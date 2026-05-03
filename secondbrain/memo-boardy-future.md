@@ -6,7 +6,7 @@ This file captures ideas you've shared that are out of scope for the current bui
 
 ---
 
-## Status snapshot (2026-05-01)
+## Status snapshot (2026-05-03)
 
 - ✅ §4 "Auto-fill missing fields" — shipped via `etl/backfill_bgg.py` (Haiku) and
   then rebuilt as `etl/bgg_api.py` + `etl/backfill_v2.py` (deterministic XML
@@ -31,8 +31,14 @@ This file captures ideas you've shared that are out of scope for the current bui
 - ✅ Sleeve schema v3 (2026-04-29 PM): `sleeve_raw` dropped, `'no'`→`'na'`,
   `sleeve_requirements` is now a TODO list (rows only for non-sleeved games),
   with cascade + guard enforcing the invariant.
-- 🟡 §8 "Embeddings on description" — still open, top of the High-priority TODO
-  now that the prompt and dashboard work landed.
+- ✅ §8 "Embeddings on description" — **shipped 2026-05-03**. Hybrid SQL+cosine
+  search (`search_games_semantic` tool), e5-base reused from the rulebook RAG,
+  auto-embed hook on `add_game`/`update_game`. Pair with §8b: tool returns
+  `excluded_count` + `excluded` so coverage gaps are surfaced, never silently
+  hidden. Backfill via `etl/backfill_descriptions_tavily.py` lifted coverage
+  from 32/56 to 48/56 in one pass; remaining 8 carry a stored
+  `description_skip_reason` for follow-up. PDF→description and inline editor
+  options are tracked in TODO High priority.
 - ✅ §7 "Inventory editing UI" — shipped 2026-05-01 as `/sleeves`: KPI cards,
   to-buy table, inline +/- preset buttons per inventory row, quick-add
   form, mini-chat with its own conversation_id.
@@ -214,7 +220,10 @@ If browser STT quality disappoints in Italian: Whisper.cpp local server, or Open
 
 The v2 schema is structured and tool-queryable but not "fully AI-ready" in the RAG sense. Two additions would close the gap:
 
-- **Embeddings on `games.description`** 🟡 *open* — column `description_embedding BLOB`, indexed once when description is set/updated. Enables semantic search like "ho voglia di un gioco di esplorazione spaziale" without keyword matches. Same infra as the rulebook RAG (§5), so do them together. Now that v2 backfill will populate `description` consistently, this is the obvious next step.
+- **Embeddings on `games.description`** ✅ *shipped 2026-05-03* — column `description_embedding BLOB` + `description_hash TEXT` (SHA1 gate for re-embed). Hybrid search via new tool `search_games_semantic`: SQL filters (`players`, `max_complexity_weight`, `max_duration_min`, `sleeve_status`, `category_contains`, `mechanic_contains`) narrow the candidate set, then cosine over e5-base ranks survivors. Auto-embed hook in `add_game`/`update_game`. Module `app/games_semantic.py` reuses the rulebook embed model (`_model_lazy()`) — no second download.
+  - **Coverage gap surfaced** (2026-05-03 PM): added `description_skip_reason TEXT` so failed backfills leave a queryable trail. Tool now returns `{count, items, excluded_count, excluded}` and the model is instructed to warn the user when `excluded_count > 0`. Same anti-hallucination logic as §8b — never present a subset as exhaustive.
+  - **Backfill paths** for the 24/56 games that lacked a description: `etl/backfill_descriptions_tavily.py` uses Tavily (BGG-only domain) + DeepSeek json_object extraction. Strict-JSON prompt block + `_try_repair_json()` repair fallback eliminate the apostrophe-induced unterminated-string bug we saw on first run. Result on 2026-05-03: 48/56 indexed in ~3 min, with the rest carrying a stored skip_reason for later manual handling. The rerun with the stricter prompt closed more of the gap.
+  - **Next options for the residual non-BGG games** (espansioni rare, fan-titles, edizioni italiane senza match): (a) PDF→description for games whose rulebook is already ingested — pull 1–2 RAG chunks, ask DeepSeek for a 3-sentence summary, write via `update_game`. Reuses existing infra. (b) Inline description editor in `/library` for the truly bespoke titles. Tracked in TODO.md High priority.
 - **Audit log table** ✅ shipped 2026-04-28 — `changes(id, ts, table_name, row_id, row_label, action, field, old_value, new_value, source)` with indices on `(table_name, row_id)` and `ts DESC`. Implementation in `app/audit.py` using a thin wrapper approach (not SQL triggers — keeps the logic in Python where the source can be injected via `app/chat.py` introspection without showing up in the JSON tool schema).
   - Source values in use: `chat:{conversation_id}` (auto), `backfill_v2`, `manual`, `unknown`. ETL writes (`import_excel.py`) intentionally bypass the log because that script is destructive bulk-reset by design.
   - Read access: tool `recent_changes(limit, table?, game_name?)` — Sonnet now consults this for "quando ho aggiunto X?" / "cosa è cambiato di Y?" instead of guessing.
