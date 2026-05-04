@@ -7,7 +7,7 @@ Personal board-game inventory chatbot. Single-user, runs on Windows. Natural-lan
 ```bash
 uv sync                                            # install deps
 uv run uvicorn app.main:app --port 8765            # run web app
-uv run python etl/import_excel.py                  # destructive re-import (see Conventions)
+uv run python etl/import_excel.py                  # upsert-by-name re-import (see Conventions)
 ```
 
 Backfills (run in order on a fresh DB):
@@ -42,7 +42,7 @@ No test suite — validate by smoke-testing a tool (`uv run python -c "from app.
 
 - **Reply in the user's language.** Italian for Italian prompts; the user mixes IT/EN freely.
 - **Confirm before destructive ops.** `delete_game` and BGG-enriched `add_game`/`update_game` must propose a table and wait for "sì/confermo".
-- **`etl/import_excel.py` wipes** `games` / `sleeve_requirements` / bridges. Inventory, conversations, dim tables survive. Chat-added games (e.g. Concordia) disappear on re-import — by design until upsert lands.
+- **`etl/import_excel.py` upserts by `name`** (since 2026-05-04). Existing games get their ETL-managed columns refreshed (players/duration/complexity/condition/sleeve_status); BGG-enriched fields and chat-added games survive. Caveat: if a chat-cleaned name diverges from the Excel cell you get a duplicate — see LEARNINGS 2026-05-04.
 - **No "Fonti:" prose sections** after web_search — system prompt forbids it (post-processor mangles them). Inline `[label](url)` only.
 - **`add_to_inventory(width, height, delta, ...)` is preferred** over `update_inventory` for purchases/consumption: server-side arithmetic, refuses negative results.
 - **`_source` is internal.** Never put it in a tool's JSON schema — chat.py injects it. Otherwise the model can spoof audit origins.

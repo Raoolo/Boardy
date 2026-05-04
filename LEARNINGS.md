@@ -5,6 +5,60 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-05-04 — ETL upsert + name-divergence gotcha
+
+### TL;DR
+`etl/import_excel.py` ora fa upsert per `name` invece di DROP+CREATE. Chat-added
+games sopravvivono al re-import. **Però**: se un nome è stato ripulito in chat
+(typo Excel, virgola in coda, newline embedded), il re-import crea un duplicato
+con il nome Excel originale. Diff Excel↔DB è ora un side effect visibile.
+
+### Cosa ha funzionato
+- DDL passato a `CREATE TABLE IF NOT EXISTS` — le migrazioni v3/v4 di
+  `app/schema.py` rimangono autorevoli, l'ETL non le sovrascrive.
+- UPDATE limitato alle colonne **ETL-managed** (players, duration,
+  complexity_label, condition, sleeve_status). Tutto il resto (`bgg_id`,
+  `description`, `description_embedding`, `complexity_weight`, `notes`,
+  `thumbnail_url`...) sopravvive perché non è nell'UPDATE statement.
+- Bridges designer/publisher e `sleeve_requirements` ricostruiti **solo per i
+  giochi presenti in Excel** (`DELETE WHERE game_id=?` + INSERT). Chat-only
+  games conservano i loro bridges intatti.
+- Output: "Inserted N new, updated M existing, preserved K" rende la divergenza
+  Excel↔DB ispezionabile a colpo d'occhio.
+
+### Gotcha: nomi divergenti = duplicati silenziosi
+Smoke test sul DB attuale (56 giochi, 3 chat-added):
+```
+Inserted 3 new, updated 53 existing
+Preserved 3 game(s) not in Excel: Here To Slay, Il Signore dei Tortelli -Le Due Torri-, Sherlock Holmes ...
+```
+I "3 new" non erano davvero nuovi — erano gli **originali Excel** dei tre giochi
+chat-added, perché in chat erano stati ripuliti:
+| DB (chat) | Excel | Causa |
+|---|---|---|
+| `Here To Slay` | `Here To Slay, Gioco` | virgola+suffisso Excel |
+| `Il Signore dei Tortelli -Le Due Torri-` | `Il Singore dei Tortelli ...` | typo "Singore" |
+| `Sherlock Holmes Consulente Investigativo: ...` | stesso ma con `\n` embedded | wrap Excel |
+
+Il match per nome è esatto (`SELECT id FROM games WHERE name=?`), quindi i 3
+nomi Excel sono finiti come INSERT puliti accanto alle versioni chat. Ho
+cancellato manualmente i duplicati dopo il test.
+
+**Lezione**: l'upsert per nome funziona solo se chi ripulisce un nome in chat
+ripulisce **anche** la cella Excel, oppure se aggiungiamo un layer di
+matching fuzzy (Levenshtein / strip punteggiatura / normalizzazione newline).
+Per ora: se il re-import stampa "Inserted N" e ti aspettavi 0, controlla i
+nomi prima di accettare.
+
+### Quando aggiungere fuzzy matching
+Solo se la divergenza si ripresenta. Per ora la regola ad-hoc è: dopo un
+re-import, ispezionare la sezione "Inserted N new" del log; se contiene nomi
+che assomigliano a giochi già presenti, decidere se patchare Excel o il DB.
+Non aggiungere normalizzazione preventiva — la stiamo facendo *due volte*
+(import + chat-edit) e ognuna ha contesto diverso.
+
+---
+
 ## 2026-05-04 — Coverage gap chiusa con backfill description-only
 
 ### TL;DR

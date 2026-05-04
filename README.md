@@ -67,7 +67,7 @@ uv sync
 # 2. Set your API key in a .env file at repo root
 echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 
-# 3. Import your Excel inventory (destructive — wipes games + sleeves)
+# 3. Import your Excel inventory (upsert by name — preserves chat-added games and BGG enrichment)
 uv run python etl/import_excel.py
 
 # 4. Run the server
@@ -110,10 +110,13 @@ app/
   rulebooks.py    PDF parsing, chunking, embedding, cosine search
   audit.py        Audit-log helpers (log_change / log_diff / log_full / recent)
 etl/
-  import_excel.py     Excel → SQLite (regex-splits sleeve column)
-  bgg_api.py          BGG XML API2 client (parser + cache + bearer auth)
-  backfill_v2.py      Deterministic 3-phase BGG backfill orchestrator
-  backfill_bgg.py     [DEPRECATED] Haiku + web_search backfill — kept for reference
+  import_excel.py                    Excel → SQLite, upsert-by-name (regex-splits sleeve column)
+  bgg_api.py                         BGG XML API2 client (parser + cache + bearer auth)
+  backfill_v2.py                     Deterministic 3-phase BGG backfill orchestrator
+  backfill_descriptions_tavily.py    Tavily search → DeepSeek extract → games.description (BGG-only)
+  backfill_descriptions_websearch.py Same but broader allowlist + --manual override (closes coverage gaps)
+  embed_descriptions.py              (Re-)build games.description_embedding for semantic search
+  backfill_bgg.py                    [DEPRECATED] Haiku + web_search backfill — kept for reference
 web/
   index.html      Single-file UI (HTML + CSS + JS inline)
 rulebooks/        Uploaded PDFs land here
@@ -126,16 +129,19 @@ boardy.db         SQLite database (gitignored)
 - **Idempotent migration** — `app/schema.py` runs on every server boot; if it sees the v1 flat schema it rewrites in place.
 - **No vector DB** — at <10k chunks, NumPy brute-force cosine over L2-normalized float32 BLOBs is plenty fast and removes a dependency.
 - **Server-side web search** — `web_search_20250305` is executed by Anthropic, not by us; we just supply the `allowed_domains`.
-- **Citations survive JSON round-trips** — text blocks with citations get an inline `[↗](url)` suffix so they render in Markdown without losing the source.
+- **Inline citations** — the model writes plain Markdown links (`[BGG](url)`) inside its prose. The arrow-icon suffix `[↗](url)` was removed once the prompt stopped teaching it.
+- **Semantic search on descriptions** — `app/games_semantic.py` does hybrid SQL-filter + cosine over e5-base embeddings stored as BLOBs on `games`. Coverage 56/56 thanks to the description backfill scripts.
+- **Non-destructive ETL re-import** — `etl/import_excel.py` upserts by `name`. Chat-added games, BGG enrichment, embeddings, inventory all survive a re-run.
 - **No tests** — validation is by smoke-testing tool functions and curling `/chat`. This is a single-user weekend project, not production.
 
 ## What's next
 
 See [`TODO.md`](TODO.md) for the prioritized backlog. Highlights:
 
-- Semantic search over game descriptions (*"ho voglia di un gioco di esplorazione spaziale"*)
-- Inline footnote-style citations instead of `[↗]`
-- Inventory bulk-edit UI
+- Library v2: thumbnail grid view as an alternative to the current dense table
+- Voice input via the Web Speech API (mic button next to "Invia")
+- OCR fallback (`pytesseract`) for scanned-image rulebooks
+- Smarter chunking for tabular reference pages (HeroQuest, Twilight Imperium)
 
 ## License
 

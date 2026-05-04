@@ -1,8 +1,21 @@
 """Excel -> SQLite ETL for Boardy.
 
 Reads sheet 'Elenco Premium' from `1) ElencoGiochi.xlsx`, parses the messy
-SLEEVE column with regex, and writes a normalized SQLite database at
-`boardy.db`. Idempotent: drops & recreates tables on every run.
+SLEEVE column with regex, and upserts into the SQLite database at `boardy.db`.
+
+Upsert semantics (since 2026-05-04):
+- Games are matched by `name`. Existing rows have their ETL-managed columns
+  overwritten (players, duration, complexity, condition, sleeve_status); all
+  other columns (bgg_id, description, embeddings, etc. populated by chat / BGG
+  backfill) are preserved.
+- Designers/publishers bridges are rebuilt only for games present in Excel.
+- `sleeve_requirements` rows are rebuilt only for games present in Excel.
+- Games NOT in Excel (e.g. chat-added ones like Concordia) are left untouched.
+- Inventory, conversations, audit log, dim tables (categories/mechanics that
+  aren't touched by Excel) are never modified.
+
+Schema is created with CREATE IF NOT EXISTS — destructive DDL was dropped to
+make re-imports safe. App boot (`app.schema.migrate()`) handles v3+ migrations.
 
 Run:
     uv run python etl/import_excel.py
@@ -22,16 +35,10 @@ UNPARSED_PATH = ROOT / "etl" / "unparsed.txt"
 SHEET_NAME = "Elenco Premium"
 HEADER_ROW = 3  # row 3 is the header; data starts at row 4
 
+# Idempotent baseline schema — only creates tables on a fresh DB. Existing
+# DBs (with v3/v4 migrations applied by app boot) are left untouched.
 SCHEMA = """
-DROP TABLE IF EXISTS sleeve_requirements;
-DROP TABLE IF EXISTS sleeve_inventory;
-DROP TABLE IF EXISTS game_designers;
-DROP TABLE IF EXISTS game_publishers;
-DROP TABLE IF EXISTS game_categories;
-DROP TABLE IF EXISTS game_mechanics;
-DROP TABLE IF EXISTS games;
-
-CREATE TABLE games (
+CREATE TABLE IF NOT EXISTS games (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   bgg_id INTEGER UNIQUE,
@@ -62,12 +69,12 @@ CREATE TABLE IF NOT EXISTS publishers (id INTEGER PRIMARY KEY, name TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS mechanics  (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 
-CREATE TABLE game_designers  (game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE, designer_id INTEGER NOT NULL REFERENCES designers(id) ON DELETE CASCADE, PRIMARY KEY(game_id,designer_id));
-CREATE TABLE game_publishers (game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE, publisher_id INTEGER NOT NULL REFERENCES publishers(id) ON DELETE CASCADE, PRIMARY KEY(game_id,publisher_id));
-CREATE TABLE game_categories (game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE, category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE, PRIMARY KEY(game_id,category_id));
-CREATE TABLE game_mechanics  (game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE, mechanic_id INTEGER NOT NULL REFERENCES mechanics(id) ON DELETE CASCADE, PRIMARY KEY(game_id,mechanic_id));
+CREATE TABLE IF NOT EXISTS game_designers  (game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE, designer_id INTEGER NOT NULL REFERENCES designers(id) ON DELETE CASCADE, PRIMARY KEY(game_id,designer_id));
+CREATE TABLE IF NOT EXISTS game_publishers (game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE, publisher_id INTEGER NOT NULL REFERENCES publishers(id) ON DELETE CASCADE, PRIMARY KEY(game_id,publisher_id));
+CREATE TABLE IF NOT EXISTS game_categories (game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE, category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE, PRIMARY KEY(game_id,category_id));
+CREATE TABLE IF NOT EXISTS game_mechanics  (game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE, mechanic_id INTEGER NOT NULL REFERENCES mechanics(id) ON DELETE CASCADE, PRIMARY KEY(game_id,mechanic_id));
 
-CREATE TABLE sleeve_requirements (
+CREATE TABLE IF NOT EXISTS sleeve_requirements (
   id INTEGER PRIMARY KEY,
   game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
   count INTEGER NOT NULL,
@@ -76,7 +83,7 @@ CREATE TABLE sleeve_requirements (
   note TEXT
 );
 
-CREATE TABLE sleeve_inventory (
+CREATE TABLE IF NOT EXISTS sleeve_inventory (
   id INTEGER PRIMARY KEY,
   width_mm REAL NOT NULL,
   height_mm REAL NOT NULL,
@@ -85,8 +92,8 @@ CREATE TABLE sleeve_inventory (
   UNIQUE(width_mm, height_mm, brand)
 );
 
-CREATE INDEX idx_req_size ON sleeve_requirements(width_mm, height_mm);
-CREATE INDEX idx_inv_size ON sleeve_inventory(width_mm, height_mm);
+CREATE INDEX IF NOT EXISTS idx_req_size ON sleeve_requirements(width_mm, height_mm);
+CREATE INDEX IF NOT EXISTS idx_inv_size ON sleeve_inventory(width_mm, height_mm);
 """
 
 
@@ -219,17 +226,21 @@ def main() -> None:
     ws = wb[SHEET_NAME]
 
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
 
     unparsed: list[str] = []
-    games_count = 0
+    inserted = 0
+    updated = 0
     req_count = 0
+    excel_names: set[str] = set()
 
     for row in ws.iter_rows(min_row=HEADER_ROW + 1, values_only=True):
         name = row[0]
         if not name or not str(name).strip():
             continue
         name = str(name).strip()
+        excel_names.add(name)
 
         producer = (str(row[1]).strip() if row[1] else None)
         publisher = (str(row[2]).strip() if row[2] else None)
@@ -253,20 +264,43 @@ def main() -> None:
         ):
             unparsed.append(f"{name!r}: {sleeve_raw_str!r}")
 
-        cur = conn.execute(
-            """INSERT INTO games(name, players_min, players_max, players_best,
-                                 duration_min, complexity_label, condition,
-                                 sleeve_status)
-               VALUES(?,?,?,?,?,?,?,?)""",
-            (
-                name, p_min, p_max, players_raw,
-                duration, complexity, condition, status,
-            ),
-        )
-        game_id = cur.lastrowid
-        games_count += 1
+        # Upsert game by name. Only ETL-managed columns are overwritten;
+        # bgg_id, description, embeddings, notes, etc. are preserved.
+        existing = conn.execute(
+            "SELECT id FROM games WHERE name=?", (name,)
+        ).fetchone()
+        if existing:
+            game_id = existing["id"]
+            conn.execute(
+                """UPDATE games
+                   SET players_min=?, players_max=?, players_best=?,
+                       duration_min=?, complexity_label=?, condition=?,
+                       sleeve_status=?, updated_at=CURRENT_TIMESTAMP
+                   WHERE id=?""",
+                (
+                    p_min, p_max, players_raw, duration,
+                    complexity, condition, status, game_id,
+                ),
+            )
+            updated += 1
+        else:
+            cur = conn.execute(
+                """INSERT INTO games(name, players_min, players_max, players_best,
+                                     duration_min, complexity_label, condition,
+                                     sleeve_status)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    name, p_min, p_max, players_raw,
+                    duration, complexity, condition, status,
+                ),
+            )
+            game_id = cur.lastrowid
+            inserted += 1
 
-        # Bridge designers (split CSV)
+        # Rebuild designers/publishers bridges for THIS game only.
+        # Chat-only games (not in Excel) keep their bridges intact.
+        conn.execute("DELETE FROM game_designers WHERE game_id=?", (game_id,))
+        conn.execute("DELETE FROM game_publishers WHERE game_id=?", (game_id,))
         if producer:
             for d in [s.strip() for s in producer.split(",") if s.strip()]:
                 did = _upsert_dim(conn, "designers", d)
@@ -276,6 +310,8 @@ def main() -> None:
                 pid = _upsert_dim(conn, "publishers", p)
                 conn.execute("INSERT OR IGNORE INTO game_publishers(game_id, publisher_id) VALUES(?,?)", (game_id, pid))
 
+        # Rebuild sleeve_requirements for THIS game only.
+        conn.execute("DELETE FROM sleeve_requirements WHERE game_id=?", (game_id,))
         # Invariant: sleeved/na games must not carry pending requirements rows.
         # `classify_sleeve` already enforces this, but we double-check here so a
         # future regression doesn't silently re-introduce phantom sleeves.
@@ -289,12 +325,25 @@ def main() -> None:
             )
             req_count += 1
 
+    # Count games in DB but NOT in Excel — these were preserved (chat-added etc.).
+    if excel_names:
+        placeholders = ",".join("?" * len(excel_names))
+        preserved_rows = conn.execute(
+            f"SELECT name FROM games WHERE name NOT IN ({placeholders})",
+            tuple(excel_names),
+        ).fetchall()
+    else:
+        preserved_rows = []
+
     conn.commit()
     conn.close()
 
     UNPARSED_PATH.write_text("\n".join(unparsed) + ("\n" if unparsed else ""), encoding="utf-8")
 
-    print(f"Imported {games_count} games, {req_count} sleeve-requirement rows.")
+    print(f"Inserted {inserted} new, updated {updated} existing, {req_count} sleeve-requirement rows.")
+    if preserved_rows:
+        print(f"Preserved {len(preserved_rows)} game(s) not in Excel: "
+              + ", ".join(r["name"] for r in preserved_rows))
     print(f"Unparsed cells: {len(unparsed)} (see {UNPARSED_PATH.name})")
     print(f"DB: {DB_PATH}")
 
