@@ -45,8 +45,8 @@ For long-form rationale see `secondbrain/memo-boardy-future.md`.
 - [ ] **Chunking for tabular rulebooks** — current line-based chunker breaks HeroQuest/TI reference tables. Try a heuristic that keeps consecutive table-like lines together.
 
 ## 🟢 Low priority
+- [ ] **Self-host deploy** — far girare Boardy 24/7 fuori dal PC. Candidati nell'ordine: (a) server dell'amico via `Dockerfile` + `docker-compose.yml` + Cloudflare Tunnel (zero port-forwarding, hostname stabile, gratis); (b) Raspberry Pi 5 8GB (~85€, tuo controllo, ~5W); (c) VPS Hetzner CX22 (~4€/mese, fallback). Risorse misurate: ~150MB RAM idle, ~500MB–1GB con e5 caricato, ~1.5GB disco (model cache compresa), CPU ~0% idle. Da fare quando si decide il target: scrivere il `Dockerfile` (multi-stage, pre-cache del modello e5 in build per evitare il download al primo avvio), volume per `boardy.db` + `rulebooks/`, env file con `ANTHROPIC_API_KEY` + `BGG_API_TOKEN`, healthcheck su `/`. Aggiungere sezione "Deploy" al README.
 - [ ] **Telegram bot** sharing the same `/chat` endpoint (memo §3). Skip WhatsApp.
-- [ ] **BGG sleeve-count discovery** — try BGG forums/files for community sleeve guides; current backfill leaves the 22 "sleeved-no-detail" games unfixed.
 - [ ] **UI redesign attempt #2** — minimal/Linear-inspired, not skeumorphic-2005. User vetoed the wood+parchment attempt.
 - [ ] **Vendor `marked.js` locally** to enable offline-first.
 
