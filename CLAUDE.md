@@ -14,6 +14,7 @@ Backfills (run in order on a fresh DB):
 ```bash
 uv run python etl/backfill_v2.py phase1 | phase2 [--auto] | apply --gid N --bgg X
 uv run python etl/backfill_descriptions_tavily.py [--only NAME] [--dry-run]
+uv run python etl/backfill_descriptions_websearch.py [--only NAME] [--manual "text"] [--dry-run]
 uv run python etl/embed_descriptions.py [--force]
 ```
 

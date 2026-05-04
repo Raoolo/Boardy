@@ -37,8 +37,17 @@ This file captures ideas you've shared that are out of scope for the current bui
   `excluded_count` + `excluded` so coverage gaps are surfaced, never silently
   hidden. Backfill via `etl/backfill_descriptions_tavily.py` lifted coverage
   from 32/56 to 48/56 in one pass; remaining 8 carry a stored
-  `description_skip_reason` for follow-up. PDF→description and inline editor
-  options are tracked in TODO High priority.
+  `description_skip_reason` for follow-up.
+- ✅ §8c "Coverage gap chiusa" — **shipped 2026-05-04**. Nuovo
+  `etl/backfill_descriptions_websearch.py`: Tavily allowlist allargato
+  (BGG + Wikipedia IT/EN + publishers), DeepSeek estrazione description-only
+  (payload più piccolo = niente bug json_object), flag `--manual TEXT` per
+  parodia/edizioni IT senza pagina BGG. **Coverage 56/56 (100%)**. La tesi
+  "ridurre la superficie del JSON elimina i bug di parsing" si è confermata:
+  stesso provider, stesso modo, due giochi che fallivano nello script
+  all-fields hanno funzionato qui. Per i due rimanenti (Tortelli parodia,
+  I Coloni di Catan ambiguo) il `--manual` è la soluzione naturale, non
+  un fallback di emergenza.
 - ✅ §7 "Inventory editing UI" — shipped 2026-05-01 as `/sleeves`: KPI cards,
   to-buy table, inline +/- preset buttons per inventory row, quick-add
   form, mini-chat with its own conversation_id.

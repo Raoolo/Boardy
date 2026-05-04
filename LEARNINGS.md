@@ -5,6 +5,81 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-05-04 — Coverage gap chiusa con backfill description-only
+
+### TL;DR
+4 giochi residui senza description (`7 Wonders II`, `I Coloni di Catan`,
+`Il Signore dei Tortelli -Le Due Torri-`, `War Chest`) ora indicizzati. Coverage
+56/56 (100%), `excluded_count=0` su qualsiasi query semantica.
+
+### Cosa ha funzionato
+Nuovo script `etl/backfill_descriptions_websearch.py` complementare al
+`backfill_descriptions_tavily.py` esistente. Differenze chiave:
+
+| Aspetto | tavily (esistente) | websearch (nuovo) |
+|---|---|---|
+| Domini search | Solo BGG | BGG + Wikipedia IT/EN + 6 publisher |
+| Schema estratto | All-fields (~16 campi) | Solo `description` |
+| LLM | DeepSeek `json_object` | DeepSeek `json_object` (payload più piccolo) |
+| Manual override | No | `--manual TEXT` |
+
+L'insight: **ridurre la superficie del JSON output elimina i bug di parsing**.
+Lo script "all-fields" falliva su `War Chest`/`I Coloni` con
+`Unterminated string`. Stesso provider, stessa modalità, ma un payload
+con solo `{description: "..."}` non innesca i casi limite del json_object
+mode di DeepSeek. **Lezione**: quando un task si può scomporre in due
+prompt — uno generale e uno mirato — i fallimenti del primo si
+recuperano col secondo senza cambiare provider.
+
+### Cosa ha richiesto override manuale
+Due dei quattro non sarebbero mai usciti dall'auto-extraction, indipendentemente
+dal provider:
+- **`Il Signore dei Tortelli`**: parodia italiana del SdA, non esiste su BGG né
+  su Wikipedia. Niente da estrarre, serve descrizione utente-fornita.
+- **`I Coloni di Catan`**: il LLM continua a confondere col "Catan Card Game"
+  perché Tavily restituisce tante varianti (Card, Histories, Junior, ...). Il
+  modello giustamente fa skip per non guessare. Per l'utente quel nome è
+  inequivocabile (= Catan classico, edizione italiana 1999), quindi
+  `--manual` è l'output corretto.
+
+→ **Pattern generale**: per giochi ambigui/parodia/edizioni non standard,
+`--manual` non è un fallback "di emergenza" ma la soluzione naturale.
+Un editor inline su `/library` resta utile per onboarding di nuovi giochi
+in chat (vedi TODO medium), ma per il backfill batch il flag CLI basta.
+
+### Bug fix collaterale
+Operator precedence nel WHERE del nuovo script:
+```sql
+-- BUG (in script vecchio): AND lega più stretto di OR
+WHERE description IS NULL OR description='' AND LOWER(name) LIKE ?
+-- Equivale a: WHERE description IS NULL OR (description='' AND LOWER(name) LIKE ?)
+-- → tutti gli IS NULL passano a prescindere dal --only filter
+
+-- FIX (nel nuovo script):
+WHERE (description IS NULL OR description='') AND LOWER(name) LIKE ?
+```
+Lo script `backfill_descriptions_tavily.py` ha lo stesso bug — flagged
+ma non patchato per non sporcare questa modifica. Fix indipendente.
+
+### Conseguenza per gli aggiornamenti futuri
+L'auto-embed hook su `add_game`/`update_game` significa che ogni gioco
+nuovo o modificato si indicizza da solo. Lo script websearch resta
+disponibile per:
+- Re-import o reset DB (rifaresti backfill_v2 → backfill_tavily → websearch
+  come "secondo passaggio" sui residui).
+- Giochi aggiunti via chat senza description (l'`add_game` da chat la
+  popolerebbe se il modello la include, altrimenti websearch in batch).
+
+### Credito Anthropic finito
+Primo tentativo del nuovo script con Anthropic Haiku: HTTP 400
+"Your credit balance is too low". Ho switchato a DeepSeek (key già nel
+`.env`, provider attivo). Da considerare: il `LLM_PROVIDER=deepseek` nel
+`.env` è ancora il default operativo nonostante MEMORY note dicesse
+".env tornato ad Anthropic" — la realtà è DeepSeek attivo, Anthropic key
+presente ma a credito 0. Aggiornare la memory.
+
+---
+
 ## 2026-05-03 (PM, post-mortem) — Skip-reason column + tool surfaces excluded games
 
 ### TL;DR
