@@ -364,7 +364,10 @@ function renderToBuy() {
 }
 
 function renderInventory() {
-  const rows = STATE.data.inventory;
+  // Hide zero-count rows from the view: they're noise once you've burned
+  // through a stash. The row stays in the DB so the audit log keeps its
+  // history, but it doesn't pollute the table until count > 0 again.
+  const rows = (STATE.data.inventory || []).filter(r => (r.count_owned || 0) > 0);
   const meta = document.getElementById("inv-meta");
   const wrap = document.getElementById("inv-wrap");
   meta.textContent = `${rows.length} ${rows.length === 1 ? "riga" : "righe"}`;
