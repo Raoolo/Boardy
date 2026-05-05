@@ -42,16 +42,20 @@
     padding: 14px 24px; border-bottom: 1px solid var(--border);
     background: #11141a;
   }
-  .filters input, .filters select {
+  /* Direct-child selectors only — otherwise this rule leaks into the
+     multi-select panel (.ms-panel input checkbox, .ms-search input) and
+     forces them to min-width: 140px, breaking the dropdown layout. */
+  .filters > input, .filters > select {
     background: var(--field); color: var(--fg);
     border: 1px solid var(--field-edge); border-radius: 8px;
     padding: 8px 12px; font-size: 13px; font-family: inherit;
     min-width: 140px;
   }
-  .filters input:focus, .filters select:focus {
+  .filters > input[type=number] { min-width: 160px; max-width: 180px; }
+  .filters > input:focus, .filters > select:focus {
     outline: none; border-color: var(--accent);
   }
-  .filters input[type=text] { min-width: 220px; flex: 1; max-width: 360px; }
+  .filters > input[type=text] { min-width: 220px; flex: 1; max-width: 360px; }
   .filters .reset {
     background: transparent; color: var(--muted); border: 1px solid var(--field-edge);
     padding: 8px 14px; border-radius: 8px; font-size: 13px; cursor: pointer;
@@ -59,12 +63,93 @@
   }
   .filters .reset:hover { color: var(--accent); border-color: var(--accent); }
 
+  /* Multi-select dropdown */
+  .ms { position: relative; min-width: 160px; }
+  .ms-trigger {
+    width: 100%; text-align: left;
+    background: var(--field); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 8px;
+    padding: 8px 28px 8px 12px; font-size: 13px; cursor: pointer;
+    font-family: inherit;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    position: relative;
+  }
+  .ms-trigger::after {
+    content: "▾"; position: absolute; right: 10px; top: 50%;
+    transform: translateY(-50%); color: var(--muted); font-size: 10px;
+  }
+  .ms-trigger:hover, .ms.open .ms-trigger { border-color: var(--accent); }
+  .ms-trigger.has-value { color: var(--accent); }
+  .ms-panel {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0;
+    z-index: 50; min-width: 240px; max-width: 320px;
+    background: var(--field); border: 1px solid var(--field-edge);
+    border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+    padding: 8px;
+  }
+  .ms.open .ms-panel { display: block; }
+  .ms-search {
+    width: 100%; margin-bottom: 6px;
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 6px;
+    padding: 6px 10px; font-size: 13px; font-family: inherit;
+  }
+  .ms-search:focus { outline: none; border-color: var(--accent); }
+  .ms-options { max-height: 260px; overflow-y: auto; }
+  .ms-option {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 4px; cursor: pointer;
+    font-size: 13px; color: var(--fg);
+    /* The whole row is clickable, including dead space — feels less
+       fiddly than aiming at the native checkbox. */
+    user-select: none;
+  }
+  .ms-option:hover { background: var(--row-hover); }
+  .ms-option input {
+    /* Explicit size: native checkboxes vary across browsers/OS and ruin
+       the alignment with the label text. flex-shrink: 0 prevents the
+       checkbox from collapsing when option text wraps. */
+    width: 14px; height: 14px; margin: 0; flex-shrink: 0;
+    cursor: pointer; accent-color: var(--accent);
+  }
+  .ms-option span {
+    /* Wrap long category/mechanic names instead of overflowing the panel. */
+    line-height: 1.3; word-break: break-word;
+  }
+  .ms-option.hidden { display: none; }
+  .ms-empty { padding: 8px; color: var(--muted); font-size: 12px; text-align: center; }
+  .ms-clear {
+    display: block; width: 100%; margin-top: 6px;
+    background: transparent; color: var(--muted); border: 1px solid var(--field-edge);
+    padding: 5px; border-radius: 6px; font-size: 12px; cursor: pointer;
+    font-family: inherit;
+  }
+  .ms-clear:hover { color: var(--accent); border-color: var(--accent); }
+
   /* Table */
   .wrap { padding: 18px 24px 40px; overflow-x: auto; }
   table {
     width: 100%; border-collapse: separate; border-spacing: 0;
-    font-size: 13.5px; min-width: 920px;
+    font-size: 13.5px; min-width: 1100px;
+    /* Fixed layout: column widths come from <col> below, NOT from cell
+       content. Without this, every filter change re-measures the visible
+       rows and the columns shift sideways. */
+    table-layout: fixed;
   }
+  /* Per-column widths. Sum is informative but the table fills 100% of
+     the wrapper anyway — these are *ratios* under fixed layout. */
+  col.c-name     { width: 22%; }
+  col.c-year     { width: 60px; }
+  col.c-players  { width: 110px; }
+  col.c-duration { width: 90px; }
+  col.c-weight   { width: 150px; }
+  col.c-rating   { width: 70px; }
+  col.c-sleeve   { width: 140px; }
+  col.c-cats     { width: 18%; }
+  col.c-mechs    { width: auto; }
+  /* In fixed layout, cells ignore their content for sizing — long tag
+     lists wrap inside the cell instead of widening it. */
+  td .tags { max-width: 100%; }
   th, td {
     padding: 10px 12px; text-align: left; vertical-align: top;
     border-bottom: 1px solid var(--border);
@@ -108,10 +193,150 @@
     background: var(--pill); color: var(--pill-fg);
     padding: 2px 8px; border-radius: 6px; font-size: 11.5px;
   }
+  /* "+N altre" expand chip — same shape as a tag, but interactive */
+  .tag.more {
+    cursor: pointer; background: transparent;
+    border: 1px dashed var(--field-edge); color: var(--muted);
+  }
+  .tag.more:hover { color: var(--accent); border-color: var(--accent); }
+  .tags-extra { display: contents; }
+  .tags-extra.hidden { display: none; }
   .empty {
     padding: 80px 24px; text-align: center; color: var(--muted);
   }
   .rating { color: var(--accent); font-weight: 600; }
+
+  /* View toggle (Tabella / Griglia) */
+  .view-toggle { display: flex; gap: 0; margin-left: auto; }
+  .view-toggle button {
+    background: var(--field); color: var(--muted);
+    border: 1px solid var(--field-edge);
+    padding: 8px 14px; font-size: 13px; cursor: pointer;
+    font-family: inherit;
+  }
+  .view-toggle button:first-child { border-radius: 8px 0 0 8px; border-right: none; }
+  .view-toggle button:last-child  { border-radius: 0 8px 8px 0; }
+  .view-toggle button.active {
+    background: var(--accent-dim); color: var(--fg); border-color: var(--accent);
+  }
+  .view-toggle button:hover:not(.active) { color: var(--accent); border-color: var(--accent); }
+
+  /* Grid view */
+  .grid {
+    display: grid; gap: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  }
+  .card {
+    background: var(--field); border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden;
+    display: flex; flex-direction: column;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .card:hover { border-color: var(--accent-dim); transform: translateY(-2px); }
+  .card .thumb {
+    width: 100%; aspect-ratio: 1 / 1; background: #0a0c10;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .card .thumb img {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+  }
+  .card .thumb.placeholder {
+    color: var(--muted); font-size: 28px;
+  }
+  .card .body {
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; flex: 1;
+  }
+  .card .title {
+    font-size: 13.5px; font-weight: 600; color: var(--fg);
+    line-height: 1.25;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .card .title a { color: inherit; text-decoration: none; }
+  .card .title a:hover { color: var(--accent); }
+  .card .meta {
+    color: var(--muted); font-size: 11.5px;
+    display: flex; flex-wrap: wrap; gap: 6px 10px;
+  }
+  .card .meta .sep { color: var(--field-edge); }
+  .card .pillrow {
+    display: flex; flex-wrap: wrap; gap: 4px; margin-top: auto;
+  }
+
+  /* Smart-filter (silent UX, top dock, above the filter bar).
+     Stateless: query → POST /library/filter → apply response → status line.
+     No bubble log: the dropdowns + semantic banner + table ARE the feedback.
+     The status line is the only narration channel (thinking / done / error). */
+  .smart-dock {
+    border-bottom: 1px solid var(--border);
+    background: #11141a;
+    padding: 14px 24px 16px;
+  }
+  .smart-dock h2 {
+    margin: 0 0 10px; font-size: 15px; font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .smart-dock h2 .accent { color: var(--accent); }
+  .smart-dock .hint { color: var(--muted); font-size: 12px; font-weight: 400; }
+  .smart-row { display: flex; gap: 8px; align-items: stretch; }
+  .smart-row textarea {
+    flex: 1; min-height: 38px; max-height: 120px; resize: none;
+    background: var(--field); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 8px;
+    padding: 9px 12px; font-size: 13px; font-family: inherit;
+    line-height: 1.4;
+  }
+  .smart-row textarea:focus { outline: none; border-color: var(--accent); }
+  .smart-row .send {
+    background: var(--accent-dim); color: var(--fg);
+    border: 1px solid var(--accent); border-radius: 8px;
+    padding: 0 16px; font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: inherit;
+  }
+  .smart-row .send:hover { background: var(--accent); }
+  .smart-row .send:disabled { opacity: 0.5; cursor: default; }
+  .smart-row .clear {
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--field-edge); border-radius: 8px;
+    padding: 0 14px; font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  .smart-row .clear:hover { color: var(--accent); border-color: var(--accent); }
+  /* Status line: subtle by default, becomes the focal point during/after a query. */
+  .smart-status {
+    margin-top: 8px; min-height: 18px;
+    font-size: 12.5px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px;
+    transition: color 0.2s;
+  }
+  .smart-status.thinking { color: var(--w3); }
+  .smart-status.success  { color: var(--accent); }
+  .smart-status.error    { color: var(--w5); }
+  /* Animated dots while the LLM is thinking — pure CSS, no JS timer needed. */
+  .smart-status.thinking::after {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor;
+    animation: smart-pulse 1s ease-in-out infinite;
+  }
+  @keyframes smart-pulse {
+    0%, 100% { opacity: 0.3; transform: scale(0.8); }
+    50%      { opacity: 1;   transform: scale(1.2); }
+  }
+
+  /* "Filtro semantico attivo" indicator — shown when state.semanticIds is set. */
+  .semantic-active {
+    display: none; margin: 0 24px 0; padding: 8px 12px;
+    background: rgba(95,184,120,0.10); border: 1px solid var(--accent-dim);
+    border-radius: 8px; color: var(--accent); font-size: 13px;
+    align-items: center; gap: 10px;
+  }
+  .semantic-active.show { display: flex; }
+  .semantic-active .clear {
+    margin-left: auto; background: transparent; color: var(--accent);
+    border: 1px solid var(--accent-dim); border-radius: 6px;
+    padding: 3px 10px; font-size: 12px; cursor: pointer; font-family: inherit;
+  }
+  .semantic-active .clear:hover { background: rgba(95,184,120,0.15); }
 </style>
 </head>
 <body>
@@ -125,6 +350,16 @@
   <span id="count"></span>
   <span class="spacer"></span>
 </header>
+
+<section class="smart-dock">
+  <h2>💬 <span class="accent">Filtra a parole</span> <span class="hint">— prova "giochi rilassanti per 2 in 30 minuti" oppure "qualcosa simile a Catan"</span></h2>
+  <div class="smart-row">
+    <textarea id="smart-input" placeholder="Scrivi una richiesta in italiano…" rows="1"></textarea>
+    <button class="send" id="smart-send">Invia</button>
+    <button class="clear" id="smart-clear" title="Azzera tutti i filtri">Azzera</button>
+  </div>
+  <div class="smart-status" id="smart-status"></div>
+</section>
 
 <div class="filters">
   <input type="text" id="q" placeholder="🔎 Cerca per nome…" />
@@ -145,8 +380,22 @@
     <option value="4">4 · Complesso</option>
     <option value="5">5 · Esperto</option>
   </select>
-  <select id="category"><option value="">Categoria (qualsiasi)</option></select>
-  <select id="mechanic"><option value="">Meccanica (qualsiasi)</option></select>
+  <div class="ms" id="ms-category" data-key="category" data-label="Categoria">
+    <button class="ms-trigger" type="button">Categoria (qualsiasi)</button>
+    <div class="ms-panel">
+      <input type="text" class="ms-search" placeholder="Cerca…" />
+      <div class="ms-options"></div>
+      <button type="button" class="ms-clear">Deseleziona tutto</button>
+    </div>
+  </div>
+  <div class="ms" id="ms-mechanic" data-key="mechanic" data-label="Meccanica">
+    <button class="ms-trigger" type="button">Meccanica (qualsiasi)</button>
+    <div class="ms-panel">
+      <input type="text" class="ms-search" placeholder="Cerca…" />
+      <div class="ms-options"></div>
+      <button type="button" class="ms-clear">Deseleziona tutto</button>
+    </div>
+  </div>
   <select id="sleeve">
     <option value="">Buste (qualsiasi)</option>
     <option value="sleeved">✅ Sleevato</option>
@@ -154,11 +403,32 @@
     <option value="na">❌ Non applicabile</option>
     <option value="unknown">❓ Sconosciuto</option>
   </select>
+  <input type="number" id="duration" min="1" step="5" placeholder="⏱ Durata max (min)" />
   <button class="reset" id="reset">Azzera</button>
+  <div class="view-toggle" id="viewToggle">
+    <button data-view="table" class="active" title="Tabella">▦ Tabella</button>
+    <button data-view="grid" title="Griglia">▥ Griglia</button>
+  </div>
+</div>
+
+<div id="semantic-banner" class="semantic-active">
+  <span id="semantic-label">🔍 Filtro semantico attivo</span>
+  <button class="clear" id="semantic-clear">Rimuovi</button>
 </div>
 
 <div class="wrap">
   <table id="tbl">
+    <colgroup>
+      <col class="c-name" />
+      <col class="c-year" />
+      <col class="c-players" />
+      <col class="c-duration" />
+      <col class="c-weight" />
+      <col class="c-rating" />
+      <col class="c-sleeve" />
+      <col class="c-cats" />
+      <col class="c-mechs" />
+    </colgroup>
     <thead>
       <tr>
         <th data-sort="name">Nome</th>
@@ -174,6 +444,7 @@
     </thead>
     <tbody id="rows"></tbody>
   </table>
+  <div id="grid" class="grid" style="display:none"></div>
   <div id="empty" class="empty" style="display:none">Nessun gioco trovato con questi filtri.</div>
 </div>
 
@@ -183,7 +454,18 @@ const state = {
   filtered: [],
   sortKey: "name",
   sortDir: 1, // 1 asc, -1 desc
+  view: localStorage.getItem("library.view") || "table", // "table" | "grid"
+  // Multi-select: arrays of selected option strings. Empty = no filter.
+  selected: { category: [], mechanic: [] },
+  // Smart filter: when set, only games whose id is in this Set survive
+  // applyFilters(). Populated by /library/filter when the LLM took the
+  // semantic path. null = no semantic restriction.
+  semanticIds: null,
+  semanticLabel: "",
 };
+
+// How many tags to show inline before the "+N altre" expand chip.
+const TAG_PREVIEW = 3;
 
 // Map BGG weight → complexity tier (matches the system prompt mapping).
 function weightTier(w) {
@@ -243,7 +525,18 @@ const SLEEVE_SORT_RANK = { to_sleeve: 0, unknown: 1, sleeved: 2, na: 3 };
 
 function fmtTags(arr) {
   if (!arr || !arr.length) return `<span class="muted">—</span>`;
-  return `<div class="tags">${arr.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>`;
+  // Show first TAG_PREVIEW inline; remaining are hidden behind a "+N altre" chip
+  // that toggles them in place. Click handler is wired via event delegation.
+  const head = arr.slice(0, TAG_PREVIEW);
+  const tail = arr.slice(TAG_PREVIEW);
+  const headHtml = head.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
+  if (!tail.length) return `<div class="tags">${headHtml}</div>`;
+  const tailHtml = tail.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
+  return `<div class="tags">
+    ${headHtml}
+    <span class="tags-extra hidden">${tailHtml}</span>
+    <span class="tag more" data-action="toggle-tags">+${tail.length} altre</span>
+  </div>`;
 }
 
 function escapeHtml(s) {
@@ -275,11 +568,16 @@ function applyFilters() {
   const q = document.getElementById("q").value.trim().toLowerCase();
   const players = document.getElementById("players").value;
   const complexity = document.getElementById("complexity").value;
-  const category = document.getElementById("category").value;
-  const mechanic = document.getElementById("mechanic").value;
   const sleeve = document.getElementById("sleeve").value;
+  const durationRaw = document.getElementById("duration").value;
+  const maxDuration = durationRaw ? parseInt(durationRaw, 10) : null;
+  const selCats = state.selected.category;
+  const selMechs = state.selected.mechanic;
 
   state.filtered = state.games.filter(g => {
+    // Semantic filter takes precedence: only games returned by the LLM
+    // search survive. Combined AND with the structured filters below.
+    if (state.semanticIds && !state.semanticIds.has(g.id)) return false;
     if (q && !(g.name || "").toLowerCase().includes(q)) return false;
     if (players) {
       const p = parseInt(players, 10);
@@ -292,8 +590,22 @@ function applyFilters() {
       const tier = weightTier(g.complexity_weight);
       if (tier !== parseInt(complexity, 10)) return false;
     }
-    if (category && !(g.categories || []).includes(category)) return false;
-    if (mechanic && !(g.mechanics || []).includes(mechanic)) return false;
+    if (maxDuration != null) {
+      // Use the longest reported duration we have for the game; if neither
+      // upper nor lower bound exists, exclude it (we can't prove it fits).
+      const d = g.duration_max_min ?? g.duration_min ?? null;
+      if (d == null || d > maxDuration) return false;
+    }
+    // Multi-select: OR semantics — game passes if it has at least one
+    // of the selected tags. Empty selection = no filter.
+    if (selCats.length) {
+      const cats = g.categories || [];
+      if (!selCats.some(c => cats.includes(c))) return false;
+    }
+    if (selMechs.length) {
+      const mechs = g.mechanics || [];
+      if (!selMechs.some(m => mechs.includes(m))) return false;
+    }
     if (sleeve && g.sleeve_status !== sleeve) return false;
     return true;
   });
@@ -309,32 +621,89 @@ function applyFilters() {
   render();
 }
 
-function render() {
+function cardThumb(g) {
+  if (g.thumbnail_url) return `<div class="thumb"><img src="${escapeHtml(g.thumbnail_url)}" alt="" loading="lazy" /></div>`;
+  return `<div class="thumb placeholder">🎲</div>`;
+}
+
+function cardTitle(g) {
+  const year = g.year_published ? `<span class="year">(${g.year_published})</span>` : "";
+  if (g.bgg_id) {
+    return `<a href="https://boardgamegeek.com/boardgame/${g.bgg_id}" target="_blank" rel="noopener">${escapeHtml(g.name)}</a> ${year}`;
+  }
+  return `${escapeHtml(g.name)} ${year}`;
+}
+
+function cardMeta(g) {
+  const parts = [];
+  parts.push(fmtPlayers(g));
+  parts.push(fmtDuration(g));
+  if (g.bgg_rating) parts.push(`<span class="rating">★ ${g.bgg_rating.toFixed(1)}</span>`);
+  return parts.filter(p => p && p !== "—").join('<span class="sep">·</span>');
+}
+
+function renderTableRows() {
   const tbody = document.getElementById("rows");
+  tbody.innerHTML = state.filtered.map(g => `
+    <tr>
+      <td class="name">${nameCell(g)}</td>
+      <td class="num muted">${g.year_published ?? "—"}</td>
+      <td class="num">${fmtPlayers(g)}</td>
+      <td class="num">${fmtDuration(g)}</td>
+      <td>${fmtComplexity(g)}</td>
+      <td class="num">${fmtRating(g)}</td>
+      <td>${fmtSleeve(g)}</td>
+      <td>${fmtTags(g.categories)}</td>
+      <td>${fmtTags(g.mechanics)}</td>
+    </tr>
+  `).join("");
+}
+
+function renderGridCards() {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = state.filtered.map(g => `
+    <div class="card">
+      ${cardThumb(g)}
+      <div class="body">
+        <div class="title">${cardTitle(g)}</div>
+        <div class="meta">${cardMeta(g)}</div>
+        <div class="pillrow">
+          ${fmtComplexity(g)}
+          ${fmtSleeve(g)}
+        </div>
+      </div>
+    </div>
+  `).join("");
+}
+
+function render() {
   document.getElementById("count").textContent =
     `${state.filtered.length} / ${state.games.length} giochi`;
 
+  const tbl = document.getElementById("tbl");
+  const grid = document.getElementById("grid");
+  const empty = document.getElementById("empty");
+
   if (!state.filtered.length) {
-    tbody.innerHTML = "";
-    document.getElementById("empty").style.display = "block";
+    document.getElementById("rows").innerHTML = "";
+    grid.innerHTML = "";
+    tbl.style.display = "none";
+    grid.style.display = "none";
+    empty.style.display = "block";
   } else {
-    document.getElementById("empty").style.display = "none";
-    tbody.innerHTML = state.filtered.map(g => `
-      <tr>
-        <td class="name">${nameCell(g)}</td>
-        <td class="num muted">${g.year_published ?? "—"}</td>
-        <td class="num">${fmtPlayers(g)}</td>
-        <td class="num">${fmtDuration(g)}</td>
-        <td>${fmtComplexity(g)}</td>
-        <td class="num">${fmtRating(g)}</td>
-        <td>${fmtSleeve(g)}</td>
-        <td>${fmtTags(g.categories)}</td>
-        <td>${fmtTags(g.mechanics)}</td>
-      </tr>
-    `).join("");
+    empty.style.display = "none";
+    if (state.view === "grid") {
+      tbl.style.display = "none";
+      grid.style.display = "";
+      renderGridCards();
+    } else {
+      grid.style.display = "none";
+      tbl.style.display = "";
+      renderTableRows();
+    }
   }
 
-  // Update sort arrow
+  // Update sort arrow (table only — grid uses the same sort, but no header UI)
   document.querySelectorAll("th[data-sort]").forEach(th => {
     const arrow = th.querySelector(".arrow");
     if (arrow) arrow.remove();
@@ -345,6 +714,11 @@ function render() {
       th.appendChild(span);
     }
   });
+
+  // Sync view-toggle buttons
+  document.querySelectorAll("#viewToggle button").forEach(b => {
+    b.classList.toggle("active", b.dataset.view === state.view);
+  });
 }
 
 async function load() {
@@ -352,26 +726,296 @@ async function load() {
   const data = await r.json();
   state.games = data.games;
 
-  const catSel = document.getElementById("category");
-  data.categories.forEach(c => {
-    const o = document.createElement("option"); o.value = c; o.textContent = c; catSel.appendChild(o);
-  });
-  const mechSel = document.getElementById("mechanic");
-  data.mechanics.forEach(m => {
-    const o = document.createElement("option"); o.value = m; o.textContent = m; mechSel.appendChild(o);
-  });
+  buildMultiSelect("ms-category", "category", data.categories);
+  buildMultiSelect("ms-mechanic", "mechanic", data.mechanics);
 
   applyFilters();
 }
 
-// Wire up filter inputs
-const FILTER_IDS = ["q", "players", "complexity", "category", "mechanic", "sleeve"];
+// ── Multi-select widget ────────────────────────────────────────────
+// Each widget owns its options + selection. State of truth lives in
+// state.selected[key]; the DOM is just a view. applyFilters() reads
+// state.selected — so toggling a checkbox just mutates the array,
+// updates the trigger label, and re-runs the filter pipeline.
+function buildMultiSelect(elId, key, options) {
+  const root = document.getElementById(elId);
+  const optsBox = root.querySelector(".ms-options");
+  const search = root.querySelector(".ms-search");
+  const trigger = root.querySelector(".ms-trigger");
+  const clearBtn = root.querySelector(".ms-clear");
+  const label = root.dataset.label;
+
+  optsBox.innerHTML = options.map(o => `
+    <label class="ms-option">
+      <input type="checkbox" value="${escapeHtml(o)}" />
+      <span>${escapeHtml(o)}</span>
+    </label>
+  `).join("");
+
+  function updateLabel() {
+    const n = state.selected[key].length;
+    if (n === 0) {
+      trigger.textContent = `${label} (qualsiasi)`;
+      trigger.classList.remove("has-value");
+    } else if (n === 1) {
+      trigger.textContent = state.selected[key][0];
+      trigger.classList.add("has-value");
+    } else {
+      trigger.textContent = `${label}: ${n} selezionate`;
+      trigger.classList.add("has-value");
+    }
+  }
+
+  trigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    // Close other open multi-selects first.
+    document.querySelectorAll(".ms.open").forEach(m => { if (m !== root) m.classList.remove("open"); });
+    root.classList.toggle("open");
+    if (root.classList.contains("open")) search.focus();
+  });
+
+  // Search filter: hide non-matching options.
+  search.addEventListener("input", () => {
+    const q = search.value.trim().toLowerCase();
+    optsBox.querySelectorAll(".ms-option").forEach(opt => {
+      const v = opt.querySelector("input").value.toLowerCase();
+      opt.classList.toggle("hidden", q && !v.includes(q));
+    });
+  });
+
+  optsBox.addEventListener("change", (e) => {
+    const cb = e.target;
+    if (cb.tagName !== "INPUT") return;
+    const arr = state.selected[key];
+    if (cb.checked) {
+      if (!arr.includes(cb.value)) arr.push(cb.value);
+    } else {
+      const i = arr.indexOf(cb.value);
+      if (i >= 0) arr.splice(i, 1);
+    }
+    updateLabel();
+    applyFilters();
+  });
+
+  clearBtn.addEventListener("click", () => {
+    state.selected[key] = [];
+    optsBox.querySelectorAll("input").forEach(cb => { cb.checked = false; });
+    updateLabel();
+    applyFilters();
+  });
+
+  // Expose a reset hook for the global "Azzera" button.
+  root._reset = () => {
+    state.selected[key] = [];
+    optsBox.querySelectorAll("input").forEach(cb => { cb.checked = false; });
+    search.value = "";
+    optsBox.querySelectorAll(".ms-option").forEach(o => o.classList.remove("hidden"));
+    updateLabel();
+  };
+}
+
+// Click outside any open multi-select closes it.
+document.addEventListener("click", (e) => {
+  if (e.target.closest(".ms")) return;
+  document.querySelectorAll(".ms.open").forEach(m => m.classList.remove("open"));
+});
+
+// Wire up basic filter inputs (single-value).
+const FILTER_IDS = ["q", "players", "complexity", "sleeve", "duration"];
 FILTER_IDS.forEach(id => {
   document.getElementById(id).addEventListener("input", applyFilters);
 });
 document.getElementById("reset").addEventListener("click", () => {
   FILTER_IDS.forEach(id => { document.getElementById(id).value = ""; });
+  document.querySelectorAll(".ms").forEach(m => m._reset && m._reset());
+  clearSemantic();
   applyFilters();
+});
+
+// ── Semantic banner ──────────────────────────────────────────────────
+function showSemantic(label, count) {
+  state.semanticLabel = label;
+  document.getElementById("semantic-label").textContent =
+    `🔍 Filtro semantico attivo: "${label}" — ${count} risultati`;
+  document.getElementById("semantic-banner").classList.add("show");
+}
+function clearSemantic() {
+  state.semanticIds = null;
+  state.semanticLabel = "";
+  document.getElementById("semantic-banner").classList.remove("show");
+}
+document.getElementById("semantic-clear").addEventListener("click", () => {
+  clearSemantic();
+  applyFilters();
+});
+
+// ── Smart filter (silent UX) ─────────────────────────────────────────
+// Stateless: each query is an independent POST. No bubble log — the
+// dropdowns + semantic banner + filtered table are the feedback channel.
+// The status line carries thinking/success/error narration.
+function setStatus(text, kind = "") {
+  const el = document.getElementById("smart-status");
+  el.textContent = text;
+  el.className = `smart-status ${kind}`;
+}
+
+function applySmartFilters(filters, semanticIds, query) {
+  // Maps the server response onto the existing UI controls. Doing so makes
+  // the filters visible (and editable) instead of magic — the user can see
+  // what was applied and tweak each dropdown manually.
+
+  // Reset prior smart selections first (but keep manual ones? No — a fresh
+  // smart query implies a fresh filter intent. The user can refine via UI.)
+  FILTER_IDS.forEach(id => { document.getElementById(id).value = ""; });
+  document.querySelectorAll(".ms").forEach(m => m._reset && m._reset());
+  clearSemantic();
+
+  if (filters.players != null) {
+    document.getElementById("players").value =
+      filters.players >= 6 ? "6" : String(filters.players);
+  }
+  // Tier mapping: server already speaks tiers (1-5).
+  if (filters.complexity_max_tier) {
+    document.getElementById("complexity").value = String(filters.complexity_max_tier);
+  }
+  if (filters.max_duration_min) {
+    document.getElementById("duration").value = String(filters.max_duration_min);
+  }
+  if (filters.sleeve_status) {
+    document.getElementById("sleeve").value = filters.sleeve_status;
+  }
+  if (filters.name_contains) {
+    document.getElementById("q").value = filters.name_contains;
+  }
+  if (filters.categories && filters.categories.length) {
+    state.selected.category = [...filters.categories];
+    syncMultiSelect("ms-category", "category");
+  }
+  if (filters.mechanics && filters.mechanics.length) {
+    state.selected.mechanic = [...filters.mechanics];
+    syncMultiSelect("ms-mechanic", "mechanic");
+  }
+  if (semanticIds && semanticIds.length) {
+    state.semanticIds = new Set(semanticIds);
+    showSemantic(query, semanticIds.length);
+  }
+  applyFilters();
+}
+
+// Sync the multi-select widget DOM (checkboxes + trigger label) with
+// state.selected[key] after a programmatic update.
+function syncMultiSelect(elId, key) {
+  const root = document.getElementById(elId);
+  const arr = state.selected[key];
+  root.querySelectorAll(".ms-options input").forEach(cb => {
+    cb.checked = arr.includes(cb.value);
+  });
+  const trigger = root.querySelector(".ms-trigger");
+  const label = root.dataset.label;
+  if (arr.length === 0) {
+    trigger.textContent = `${label} (qualsiasi)`;
+    trigger.classList.remove("has-value");
+  } else if (arr.length === 1) {
+    trigger.textContent = arr[0];
+    trigger.classList.add("has-value");
+  } else {
+    trigger.textContent = `${label}: ${arr.length} selezionate`;
+    trigger.classList.add("has-value");
+  }
+}
+
+async function sendSmartQuery() {
+  const ta = document.getElementById("smart-input");
+  const send = document.getElementById("smart-send");
+  const q = ta.value.trim();
+  if (!q) return;
+
+  send.disabled = true;
+  setStatus("Sto pensando", "thinking");
+
+  try {
+    const r = await fetch("/library/filter", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({query: q}),
+    });
+    if (!r.ok) {
+      const err = await r.text();
+      throw new Error(`${r.status}: ${err}`);
+    }
+    const data = await r.json();
+    if (data.reset) {
+      // User asked to clear filters: full reset of every control.
+      FILTER_IDS.forEach(id => { document.getElementById(id).value = ""; });
+      document.querySelectorAll(".ms").forEach(m => m._reset && m._reset());
+      clearSemantic();
+      applyFilters();
+      setStatus("✓ Filtri azzerati", "success");
+    } else if (data.applied) {
+      applySmartFilters(data.filters || {}, data.semantic_ids, q);
+      // Status carries the count + a hint of what was filtered. The LLM's
+      // own message is dropped on the floor — the dropdowns show it
+      // visually and a chat bubble would be redundant.
+      setStatus(`✓ ${state.filtered.length} giochi trovati`, "success");
+    } else {
+      // Ambiguous / non-filter query: preserve existing filters, just
+      // surface the LLM's reply briefly so the user knows it ran.
+      setStatus(data.message || "Nessun filtro estratto", "");
+    }
+    // Clear input only on success (so on error the user can retry/edit).
+    ta.value = "";
+    ta.style.height = "auto";
+  } catch (e) {
+    setStatus(`⚠ ${e.message}`, "error");
+  } finally {
+    send.disabled = false;
+    ta.focus();
+  }
+}
+
+document.getElementById("smart-send").addEventListener("click", sendSmartQuery);
+document.getElementById("smart-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendSmartQuery();
+  }
+});
+// Auto-grow textarea up to max-height (CSS caps it).
+document.getElementById("smart-input").addEventListener("input", (e) => {
+  e.target.style.height = "auto";
+  e.target.style.height = e.target.scrollHeight + "px";
+});
+// "Azzera" — full reset of every filter (manual + smart) and the input.
+document.getElementById("smart-clear").addEventListener("click", () => {
+  FILTER_IDS.forEach(id => { document.getElementById(id).value = ""; });
+  document.querySelectorAll(".ms").forEach(m => m._reset && m._reset());
+  clearSemantic();
+  document.getElementById("smart-input").value = "";
+  document.getElementById("smart-input").style.height = "auto";
+  setStatus("");
+  applyFilters();
+});
+
+// Tag-cell expand: click "+N altre" reveals the hidden tail in place.
+document.addEventListener("click", (e) => {
+  const more = e.target.closest('[data-action="toggle-tags"]');
+  if (!more) return;
+  const extra = more.parentElement.querySelector(".tags-extra");
+  if (!extra) return;
+  // classList.toggle returns true if the class is now present.
+  const nowHidden = extra.classList.toggle("hidden");
+  more.textContent = nowHidden
+    ? `+${extra.children.length} altre`
+    : "− nascondi";
+});
+
+// View toggle (table / grid). Persisted in localStorage so it sticks across reloads.
+document.querySelectorAll("#viewToggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    state.view = btn.dataset.view;
+    localStorage.setItem("library.view", state.view);
+    render();
+  });
 });
 
 // Sort headers

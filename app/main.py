@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import conversations as conv
+from . import games_semantic as gs
 from . import schema
 from . import rulebooks as rb
 from . import tools as tools_mod
@@ -125,6 +126,233 @@ def library_data() -> dict:
         all_categories = [r["name"] for r in c.execute("SELECT name FROM categories ORDER BY name")]
         all_mechanics  = [r["name"] for r in c.execute("SELECT name FROM mechanics ORDER BY name")]
     return {"games": games, "categories": all_categories, "mechanics": all_mechanics}
+
+
+# ── Smart filter (natural-language → filter spec) ────────────────────────────
+# Tier→weight conversions mirror weightTier() in web/library.html. Used to
+# translate user-facing tiers (1–5) into SQL-friendly weight bounds when
+# we forward the structured filters to the semantic search.
+_TIER_TO_MAX_WEIGHT = {1: 2.0, 2: 2.5, 3: 3.5, 4: 4.2, 5: 5.0}
+_TIER_TO_MIN_WEIGHT = {1: 1.0, 2: 2.0, 3: 2.5, 4: 3.5, 5: 4.2}
+
+_FILTER_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "apply_filter",
+        "description": (
+            "Apply a filter to the user's board game library. "
+            "Call EXACTLY ONCE per query. "
+            "Use semantic_query for similarity/vibe queries; otherwise leave empty."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "semantic_query": {
+                    "type": "string",
+                    "description": (
+                        "Natural-language query for semantic search over game descriptions. "
+                        "Use ONLY when the user asks for similarity ('come Catan', 'simile a X', "
+                        "'tipo Wingspan') or a vibe not captured by structured filters "
+                        "('rilassante', 'epico', 'leggero ma profondo'). Leave empty for "
+                        "purely structured queries like 'da 2 giocatori' or 'facili'."
+                    ),
+                },
+                "players": {
+                    "type": "integer",
+                    "description": "Number of players. 1–5 = exact; 6 = '6 or more'.",
+                },
+                "complexity_max_tier": {
+                    "type": "integer",
+                    "description": (
+                        "Max complexity tier the user wants. "
+                        "1=Molto Semplice, 2=Semplice, 3=Medio, 4=Complesso, 5=Esperto."
+                    ),
+                },
+                "complexity_min_tier": {"type": "integer"},
+                "max_duration_min": {
+                    "type": "integer",
+                    "description": "Maximum game duration in minutes.",
+                },
+                "sleeve_status": {
+                    "type": "string",
+                    "enum": ["sleeved", "to_sleeve", "na", "unknown"],
+                },
+                "categories": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Categories to filter by (OR semantics). MUST be exact strings from the list given in the system prompt.",
+                },
+                "mechanics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Mechanics to filter by (OR semantics). MUST be exact strings from the list given in the system prompt.",
+                },
+                "name_contains": {
+                    "type": "string",
+                    "description": "Substring to search in game names.",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Friendly Italian reply (1–2 short sentences) explaining what was filtered. Required.",
+                },
+                "reset": {
+                    "type": "boolean",
+                    "description": "Set to true if the user asked to clear all filters. All other fields will be ignored.",
+                },
+            },
+            "required": ["message"],
+        },
+    },
+}
+
+
+def _build_filter_system_prompt(categories: list[str], mechanics: list[str]) -> str:
+    """System prompt for the smart-filter LLM. Embeds the universe of valid
+    category/mechanic strings so the model can't hallucinate values."""
+    return (
+        "Sei l'assistente di filtro della libreria giochi di Boardy.\n"
+        "L'utente ti chiede di filtrare la sua collezione e tu DEVI chiamare il tool `apply_filter` "
+        "ESATTAMENTE UNA VOLTA con i parametri appropriati.\n\n"
+        "REGOLE:\n"
+        "- Se l'utente menziona somiglianza ('come Catan', 'simile a X', 'tipo Wingspan') o una vibe "
+        "non catturabile da filtri strutturali ('rilassante', 'epico', 'tranquillo', 'profondo'), "
+        "USA `semantic_query` con la frase originale dell'utente o una sua riformulazione.\n"
+        "- Per filtri puramente strutturali ('da 2', 'facili', 'sotto i 30 minuti', 'da imbustare'), "
+        "riempi i campi strutturati e NON usare `semantic_query`.\n"
+        "- Mappa la complessità: facile/leggero=tier 1-2, medio=3, complesso/pesante/esperto=4-5.\n"
+        "- `categories` e `mechanics` DEVONO essere voci esatte tra quelle disponibili sotto. "
+        "Se la categoria richiesta non c'è ESATTAMENTE, lascia vuoto e spiegalo nel message.\n"
+        "- Se l'utente dice 'azzera', 'togli i filtri', 'pulisci', metti `reset: true`.\n"
+        "- Risposta `message` SEMPRE in italiano, 1-2 frasi brevi, descrive cosa hai filtrato.\n"
+        "- Se l'utente chiede qualcosa che non puoi tradurre in filtri (es. 'quanti giochi ho?'), "
+        "rispondi nel `message` senza impostare alcun filtro.\n\n"
+        f"Categorie disponibili (usa SOLO queste): {', '.join(categories)}\n\n"
+        f"Meccaniche disponibili (usa SOLO queste): {', '.join(mechanics)}\n"
+    )
+
+
+class FilterRequest(BaseModel):
+    query: str
+
+
+@app.post("/library/filter")
+def library_filter(req: FilterRequest) -> dict:
+    """Natural-language → filter spec. Uses DeepSeek with forced tool use.
+
+    Returns:
+      filters: dict applied directly to the library UI dropdowns
+      semantic_ids: list[int] | None — when set, the table shows ONLY these IDs
+                    (in addition to the structured filters).
+      message: friendly Italian reply for the chat bubble.
+    """
+    import json
+    import os
+    from openai import OpenAI
+
+    if not req.query.strip():
+        raise HTTPException(400, "empty query")
+
+    # Universe of valid category/mechanic names — pinned into the prompt so the
+    # model can't return strings outside this set.
+    with get_conn() as c:
+        categories = [r["name"] for r in c.execute("SELECT name FROM categories ORDER BY name")]
+        mechanics = [r["name"] for r in c.execute("SELECT name FROM mechanics ORDER BY name")]
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "DEEPSEEK_API_KEY not configured")
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+    )
+
+    resp = client.chat.completions.create(
+        model=os.environ.get("LIBRARY_FILTER_MODEL", "deepseek-chat"),
+        messages=[
+            {"role": "system", "content": _build_filter_system_prompt(categories, mechanics)},
+            {"role": "user", "content": req.query},
+        ],
+        tools=[_FILTER_TOOL_SCHEMA],
+        # tool_choice forced — we ALWAYS want a structured response, never free text.
+        tool_choice={"type": "function", "function": {"name": "apply_filter"}},
+        temperature=0.0,
+    )
+
+    tcs = resp.choices[0].message.tool_calls or []
+    if not tcs:
+        raise HTTPException(502, "model did not call apply_filter")
+
+    try:
+        args = json.loads(tcs[0].function.arguments or "{}")
+    except json.JSONDecodeError as e:
+        raise HTTPException(502, f"malformed tool args: {e}")
+
+    message = (args.get("message") or "").strip() or "Filtro applicato."
+
+    # Reset path: short-circuit, return empty filters with explicit reset flag
+    # so the frontend can distinguish "user asked to clear" from "no filter
+    # extracted" (the latter shouldn't wipe existing filters).
+    if args.get("reset"):
+        return {"filters": {}, "semantic_ids": None, "message": message, "reset": True}
+
+    # Sanitize categories/mechanics against the known universe — extra safety
+    # in case the model returns near-misses despite the schema constraint.
+    cats_set = set(categories)
+    mechs_set = set(mechanics)
+    valid_cats = [c for c in (args.get("categories") or []) if c in cats_set]
+    valid_mechs = [m for m in (args.get("mechanics") or []) if m in mechs_set]
+
+    filters = {
+        "players": args.get("players"),
+        "complexity_max_tier": args.get("complexity_max_tier"),
+        "complexity_min_tier": args.get("complexity_min_tier"),
+        "max_duration_min": args.get("max_duration_min"),
+        "sleeve_status": args.get("sleeve_status"),
+        "categories": valid_cats,
+        "mechanics": valid_mechs,
+        "name_contains": args.get("name_contains"),
+    }
+
+    # Semantic path: the structured filters become SQL pre-filters on the
+    # candidate set, then cosine ranks the survivors.
+    semantic_ids: list[int] | None = None
+    sq = (args.get("semantic_query") or "").strip()
+    if sq:
+        max_w = (_TIER_TO_MAX_WEIGHT.get(filters["complexity_max_tier"])
+                 if filters["complexity_max_tier"] else None)
+        min_w = (_TIER_TO_MIN_WEIGHT.get(filters["complexity_min_tier"])
+                 if filters["complexity_min_tier"] else None)
+        # search_semantic only accepts a single category/mechanic substring;
+        # pass the first to keep the SQL pre-filter sensible.
+        cat = valid_cats[0] if valid_cats else None
+        mech = valid_mechs[0] if valid_mechs else None
+        # 'players=6' in the UI means "6+"; semantic search wants exact, so
+        # only pass it through for 1–5.
+        p = filters["players"] if filters["players"] in (1, 2, 3, 4, 5) else None
+        results = gs.search_semantic(
+            sq,
+            players=p,
+            max_complexity_weight=max_w,
+            min_complexity_weight=min_w,
+            max_duration_min=filters["max_duration_min"],
+            sleeve_status=filters["sleeve_status"],
+            category_contains=cat,
+            mechanic_contains=mech,
+            k=20,
+        )
+        semantic_ids = [r["id"] for r in results]
+
+    # Did the model actually pick anything up? If not (e.g. "quanti giochi ho?"),
+    # the frontend should NOT wipe the user's existing manual filters.
+    has_any = any(v not in (None, [], "") for v in filters.values()) or bool(semantic_ids)
+    return {
+        "filters": filters,
+        "semantic_ids": semantic_ids,
+        "message": message,
+        "reset": False,
+        "applied": has_any,
+    }
 
 
 @app.get("/sleeves")
