@@ -7,45 +7,150 @@
 <style>
   :root {
     --bg: #0f1115; --fg: #e6e7eb; --muted: #8a8f99;
-    --user: #2b6cb0; --bot: #2d3748; --accent: #5fb878;
+    --accent: #5fb878; --accent-dim: #3a7c4f;
     --border: #222831; --field: #181b22; --field-edge: #2a2f3a;
+    --row-hover: #1a1e27; --sidebar-bg: #11141a;
+    /* User bubble: literally the same green used for buttons across the
+       app — accent-dim bg + accent border. This is the "Boardy green"
+       seen on /sleeves Send, /library + Nuova chat, active nav links —
+       so the user voice is unmistakably tied to the brand color, not
+       just "vaguely greenish". */
+    --user: var(--accent-dim); --user-edge: var(--accent);
+    --bot:  #2d3748; --bot-edge:  #3a4150;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg); color: var(--fg);
     font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
-    display: flex; flex-direction: column; align-items: center;
+    display: flex; flex-direction: column;
   }
+
+  /* Top bar — same metrics as /library and /sleeves headers so the three
+     pages feel like one app: padding 14×24, h1 20px, nav before spacer,
+     active link gets the accent treatment. */
   header {
-    width: 100%; max-width: 720px; padding: 12px 20px;
+    padding: 14px 24px;
     border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
   }
-  h1 { font-size: 18px; margin: 0; font-weight: 600; flex: 0 0 auto; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
   h1 .accent { color: var(--accent); }
-  select, .iconbtn {
-    background: var(--field); color: var(--fg);
-    border: 1px solid var(--field-edge); border-radius: 8px;
-    padding: 6px 10px; font-size: 13px; cursor: pointer;
+  header .spacer { flex: 1; }
+  nav { display: flex; gap: 8px; }
+  nav a {
+    color: var(--muted); text-decoration: none; font-size: 13px;
+    border: 1px solid var(--field-edge); padding: 6px 12px; border-radius: 8px;
+  }
+  nav a:hover { color: var(--accent); border-color: var(--accent); }
+  nav a.active { color: var(--accent); border-color: var(--accent); }
+
+  /* Layout: sidebar (chat list) + main pane (messages + composer). */
+  .layout {
+    flex: 1; display: flex; min-height: 0; overflow: hidden;
+  }
+  .sidebar {
+    width: 260px; min-width: 260px;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+  }
+  .sidebar-header {
+    padding: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .new-chat-btn {
+    width: 100%;
+    background: var(--accent-dim); color: var(--fg);
+    border: 1px solid var(--accent); border-radius: 8px;
+    padding: 9px 12px; font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: inherit;
+    transition: background 150ms ease;
+  }
+  .new-chat-btn:hover { background: var(--accent); color: #0f1115; }
+  .conv-list {
+    flex: 1; overflow-y: auto;
+    list-style: none; margin: 0; padding: 6px;
+  }
+  .conv-empty {
+    color: var(--muted); font-size: 12px; padding: 14px 10px;
+    text-align: center; font-style: italic;
+  }
+  /* Each conv row: title + a × delete that's invisible until hover. The
+     active row gets an accent left-border and tinted bg so it's obvious
+     which conv you're reading without screaming. */
+  .conv-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 10px; border-radius: 8px;
+    cursor: pointer; user-select: none;
+    border-left: 2px solid transparent;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  .conv-item:hover { background: var(--row-hover); }
+  .conv-item.active {
+    background: rgba(95, 184, 120, 0.10);
+    border-left-color: var(--accent);
+  }
+  .conv-title {
+    flex: 1; font-size: 13px; color: var(--fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .conv-item.active .conv-title { color: var(--fg); }
+  .conv-item:not(.active) .conv-title { color: #c4c8d0; }
+  .conv-del {
+    background: transparent; border: 0; cursor: pointer;
+    color: var(--muted); font-size: 16px; line-height: 1;
+    padding: 2px 6px; border-radius: 6px;
+    opacity: 0; transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
     font-family: inherit;
   }
-  select { flex: 1; min-width: 120px; max-width: 320px; }
-  .iconbtn:hover, select:hover { border-color: var(--accent); }
-  .iconbtn:focus-visible, select:focus-visible {
-    outline: 2px solid var(--accent); outline-offset: 1px;
+  .conv-item:hover .conv-del,
+  .conv-item.active .conv-del { opacity: 1; }
+  .conv-del:hover { color: #f87171; background: rgba(248, 113, 113, 0.12); }
+
+  /* Main chat pane — content centered with max-width so the conversation
+     stays readable on wide screens, but the pane background extends to the
+     right edge for a clean full-bleed look. */
+  .chat-pane {
+    flex: 1; display: flex; flex-direction: column;
+    min-width: 0; min-height: 0;
   }
   #chat {
-    flex: 1; width: 100%; max-width: 720px;
-    overflow-y: auto; padding: 20px;
+    flex: 1; overflow-y: auto; padding: 22px 20px;
     display: flex; flex-direction: column; gap: 12px;
+    width: 100%; max-width: 760px; margin: 0 auto;
   }
+  .composer-wrap {
+    border-top: 1px solid var(--border);
+    padding: 12px 20px 18px;
+  }
+  form {
+    width: 100%; max-width: 760px; margin: 0 auto;
+    display: flex; gap: 8px;
+  }
+
+  /* Bubbles. */
   .msg {
     max-width: 85%; padding: 10px 14px; border-radius: 14px;
     line-height: 1.5; word-wrap: break-word;
+    /* Subtle 200ms entrance — bubbles slide up while fading. Runs once on
+       insertion; on rerender history all bubbles animate together as a
+       coherent "loading in" effect. */
+    animation: bubble-in 200ms ease-out;
   }
-  .user { align-self: flex-end; background: var(--user); white-space: pre-wrap; }
-  .bot  { align-self: flex-start; background: var(--bot); }
+  @keyframes bubble-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .user {
+    align-self: flex-end; background: var(--user);
+    border: 1px solid var(--user-edge);
+    white-space: pre-wrap;
+  }
+  .bot {
+    align-self: flex-start; background: var(--bot);
+    border: 1px solid var(--bot-edge);
+  }
   .bot p:first-child { margin-top: 0; }
   .bot p:last-child  { margin-bottom: 0; }
   .bot p { margin: 6px 0; }
@@ -65,17 +170,36 @@
     font-size: 12.5px;
   }
   .bot hr { border: 0; border-top: 1px solid #3a4150; margin: 8px 0; }
-  .typing { color: var(--muted); font-style: italic; }
-  form {
-    width: 100%; max-width: 720px; padding: 12px 20px 20px;
-    display: flex; gap: 8px; border-top: 1px solid var(--border);
+
+  /* Typing indicator — three dots that pulse in sequence. */
+  .typing {
+    display: inline-flex; gap: 5px; align-items: center;
+    padding: 12px 14px;
   }
+  .typing span {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted);
+    animation: typing-pulse 1.2s ease-in-out infinite;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.15s; }
+  .typing span:nth-child(3) { animation-delay: 0.30s; }
+  @keyframes typing-pulse {
+    0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+    30%           { opacity: 1;   transform: translateY(-3px); }
+  }
+
+  /* Composer input. */
   input[type=text] {
     flex: 1; padding: 12px 14px; border-radius: 10px;
     border: 1px solid var(--field-edge); background: var(--field); color: var(--fg);
     font-size: 14px; font-family: inherit;
+    transition: border-color 180ms ease, box-shadow 220ms ease;
   }
-  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  input[type=text]:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(95, 184, 120, 0.18);
+  }
   button.send {
     padding: 0 18px; border-radius: 10px; border: 0;
     background: var(--accent); color: #0f1115; font-weight: 600;
@@ -83,7 +207,7 @@
   }
   button.send:disabled { opacity: 0.5; cursor: progress; }
 
-  /* Drop zone overlay */
+  /* Drop zone overlay. */
   #dropOverlay {
     position: fixed; inset: 0; background: rgba(15,17,21,0.92);
     display: none; align-items: center; justify-content: center;
@@ -95,7 +219,7 @@
     font-size: 24px; color: var(--accent); font-weight: 600;
   }
 
-  /* Upload modal */
+  /* Upload modal. */
   .modal-back {
     position: fixed; inset: 0; background: rgba(0,0,0,0.6);
     display: none; align-items: center; justify-content: center; z-index: 200;
@@ -118,20 +242,42 @@
   .modal button { font-family: inherit; font-size: 13px; padding: 8px 14px; border-radius: 8px; cursor: pointer; }
   .modal .btn-primary { background: var(--accent); color: var(--bg); border: 0; font-weight: 600; }
   .modal .btn-secondary { background: transparent; color: var(--fg); border: 1px solid var(--field-edge); }
+  /* Destructive confirm action — soft red, hover slightly more saturated.
+     Keeps the modal's calm look while still reading as "this deletes". */
+  .modal .btn-danger {
+    background: #b94747; color: #fff; border: 0; font-weight: 600;
+  }
+  .modal .btn-danger:hover { background: #d05656; }
   .modal .progress { font-size: 13px; color: var(--muted); }
+  .modal .text { font-size: 13.5px; color: var(--muted); line-height: 1.5; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Bo<span class="accent">ardy</span></h1>
-  <select id="convs" title="Switch conversation"></select>
-  <button class="iconbtn" id="newBtn" title="New chat">+</button>
-  <button class="iconbtn" id="delBtn" title="Delete current chat">🗑</button>
-  <a class="iconbtn" href="/library" title="Sfoglia la libreria" style="text-decoration:none;color:inherit">📚</a>
-  <a class="iconbtn" href="/sleeves" title="Inventario buste" style="text-decoration:none;color:inherit">🛒</a>
+  <h1>Bo<span class="accent">ardy</span> · Chat</h1>
+  <nav>
+    <a href="/" class="active">Chat</a>
+    <a href="/library">Libreria</a>
+    <a href="/sleeves">Buste</a>
+  </nav>
+  <span class="spacer"></span>
 </header>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <div id="dropOverlay"><div class="label">📕 Trascina qui il PDF del regolamento</div></div>
+<!-- Custom confirm dialog (replaces native confirm() for chat deletion).
+     Generic enough to reuse for other destructive ops if needed — the JS
+     `confirmDialog()` helper sets the title/message/button label per call. -->
+<div class="modal-back" id="confirmBack">
+  <div class="modal">
+    <h2 id="confirmTitle">Conferma</h2>
+    <p class="text" id="confirmMsg"></p>
+    <div class="actions">
+      <button class="btn-secondary" id="confirmCancel">Annulla</button>
+      <button class="btn-danger"    id="confirmOk">Elimina</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-back" id="modalBack">
   <div class="modal">
     <h2>Indicizza regolamento</h2>
@@ -147,23 +293,40 @@
     </div>
   </div>
 </div>
-<div id="chat"></div>
-<form id="f">
-  <input id="m" type="text" autocomplete="off"
-         placeholder="Quante bustine 63,5×88 devo comprare?" autofocus />
-  <button class="send" id="b" type="submit">Invia</button>
-</form>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <button class="new-chat-btn" id="newBtn">+ Nuova chat</button>
+    </div>
+    <ul class="conv-list" id="convList"></ul>
+  </aside>
+
+  <section class="chat-pane">
+    <div id="chat"></div>
+    <div class="composer-wrap">
+      <form id="f">
+        <input id="m" type="text" autocomplete="off"
+               placeholder="Quante bustine 63,5×88 devo comprare?" autofocus />
+        <button class="send" id="b" type="submit">Invia</button>
+      </form>
+    </div>
+  </section>
+</div>
+
 <script>
   const chat = document.getElementById('chat');
   const form = document.getElementById('f');
   const input = document.getElementById('m');
   const btn = document.getElementById('b');
-  const convsSel = document.getElementById('convs');
+  const convList = document.getElementById('convList');
   const newBtn = document.getElementById('newBtn');
-  const delBtn = document.getElementById('delBtn');
 
   let convId = parseInt(localStorage.getItem('boardy_conv_id') || '0') || null;
   let history = [];
+  // Cache of the latest list so we can re-render the sidebar without
+  // re-fetching when active state changes.
+  let convsCache = [];
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -171,34 +334,29 @@
     convId = id;
     if (id) localStorage.setItem('boardy_conv_id', String(id));
     else    localStorage.removeItem('boardy_conv_id');
+    renderConvList();
   }
 
   function rerender() {
     chat.innerHTML = '';
-    // History is stored in whichever provider's native format wrote it.
-    // Anthropic: assistant.content is an array of blocks (text/tool_use).
-    // OpenAI/DeepSeek/Ollama: assistant.content is a string; tool_calls live
-    // in turn.tool_calls; tool results are separate role='tool' entries we skip.
-    // A conversation may even contain BOTH shapes if the provider was switched
-    // mid-thread, so we accept either per-turn.
+    // History format depends on which provider wrote it (Anthropic stores
+    // assistant.content as a block array; OpenAI/DeepSeek as a string with
+    // tool_calls separate). A single conv may even mix shapes if the
+    // provider was switched mid-thread, so we accept either per-turn.
     for (const turn of history) {
       if (turn.role === 'user' && typeof turn.content === 'string') {
-        // Anthropic packs tool_results as role=user content=[{type:'tool_result',...}].
-        // Those have non-string content and we want to skip them — the typeof
-        // check above already does that.
+        // Anthropic packs tool_results as role=user with array content;
+        // the typeof check above filters those out.
         addBubble(turn.content, 'user');
       } else if (turn.role === 'assistant') {
         let text = '';
         if (Array.isArray(turn.content)) {
-          // Anthropic shape
           text = turn.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
         } else if (typeof turn.content === 'string') {
-          // OpenAI shape — empty string when the turn was a pure tool call
           text = turn.content.trim();
         }
         if (text) addBubble(text, 'bot');
       }
-      // role==='tool' (OpenAI tool results) is intentionally not rendered.
     }
     chat.scrollTop = chat.scrollHeight;
   }
@@ -213,23 +371,51 @@
     return div;
   }
 
+  // Sidebar: build one row per conversation. Click on the row → switch.
+  // Click on the × → confirm + delete + switch to next (or empty state).
+  // Re-rendered from convsCache whenever active state or list changes —
+  // cheap because the list is short (single-user app).
+  function renderConvList() {
+    convList.innerHTML = '';
+    if (convsCache.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'conv-empty';
+      li.textContent = 'Nessuna chat ancora — scrivi qualcosa!';
+      convList.appendChild(li);
+      return;
+    }
+    for (const c of convsCache) {
+      const li = document.createElement('li');
+      li.className = 'conv-item' + (c.id === convId ? ' active' : '');
+      li.dataset.id = String(c.id);
+
+      const title = document.createElement('span');
+      title.className = 'conv-title';
+      title.textContent = c.title || `Chat #${c.id}`;
+      li.appendChild(title);
+
+      const del = document.createElement('button');
+      del.className = 'conv-del';
+      del.title = 'Elimina questa chat';
+      del.textContent = '×';
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteConv(c.id);
+      });
+      li.appendChild(del);
+
+      li.addEventListener('click', () => {
+        if (c.id !== convId) loadConv(c.id);
+      });
+      convList.appendChild(li);
+    }
+  }
+
   async function loadList() {
     const res = await fetch('/conversations');
-    const list = await res.json();
-    convsSel.innerHTML = '';
-    if (list.length === 0) {
-      const opt = document.createElement('option');
-      opt.textContent = '(nuova chat)'; opt.value = '';
-      convsSel.appendChild(opt);
-      return list;
-    }
-    for (const c of list) {
-      const opt = document.createElement('option');
-      opt.value = c.id;
-      opt.textContent = c.title || `Chat #${c.id}`;
-      convsSel.appendChild(opt);
-    }
-    return list;
+    convsCache = await res.json();
+    renderConvList();
+    return convsCache;
   }
 
   async function loadConv(id) {
@@ -239,32 +425,78 @@
     const data = await res.json();
     history = data.history || [];
     setConvId(id);
-    convsSel.value = String(id);
     rerender();
   }
 
-  convsSel.addEventListener('change', () => {
-    const id = parseInt(convsSel.value);
-    if (id) loadConv(id);
-  });
+  // Promise-based replacement for native confirm(). Resolves true on OK,
+  // false on cancel / backdrop click / Escape. Re-uses the modal pattern
+  // already in place for the rulebook upload, so styles stay consistent.
+  function confirmDialog({ title = 'Conferma', message = '', okLabel = 'Conferma' } = {}) {
+    return new Promise((resolve) => {
+      const back   = document.getElementById('confirmBack');
+      const titleE = document.getElementById('confirmTitle');
+      const msgE   = document.getElementById('confirmMsg');
+      const ok     = document.getElementById('confirmOk');
+      const cancel = document.getElementById('confirmCancel');
+      titleE.textContent = title;
+      msgE.textContent   = message;
+      ok.textContent     = okLabel;
+      back.classList.add('open');
+      ok.focus();
+
+      function cleanup(result) {
+        back.classList.remove('open');
+        ok.removeEventListener('click', onOk);
+        cancel.removeEventListener('click', onCancel);
+        back.removeEventListener('click', onBackdrop);
+        document.removeEventListener('keydown', onKey);
+        resolve(result);
+      }
+      function onOk()       { cleanup(true);  }
+      function onCancel()   { cleanup(false); }
+      function onBackdrop(e){ if (e.target === back) cleanup(false); }
+      function onKey(e) {
+        if (e.key === 'Escape') cleanup(false);
+        else if (e.key === 'Enter') cleanup(true);
+      }
+      ok.addEventListener('click', onOk);
+      cancel.addEventListener('click', onCancel);
+      back.addEventListener('click', onBackdrop);
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
+  async function deleteConv(id) {
+    const conv = convsCache.find(c => c.id === id);
+    const title = conv?.title || `Chat #${id}`;
+    const ok = await confirmDialog({
+      title: 'Cancellare la conversazione?',
+      message: `"${title}" verrà eliminata definitivamente. Vuoi procedere?`,
+      okLabel: 'Elimina',
+    });
+    if (!ok) return;
+    await fetch('/conversations/' + id, { method: 'DELETE' });
+    // Remove from cache locally so we don't have to refetch.
+    convsCache = convsCache.filter(c => c.id !== id);
+    if (id === convId) {
+      // Switch to next available conv, or empty state.
+      if (convsCache.length) {
+        await loadConv(convsCache[0].id);
+      } else {
+        history = [];
+        setConvId(null);
+        rerender();
+      }
+    } else {
+      renderConvList();
+    }
+  }
 
   newBtn.addEventListener('click', () => {
-    setConvId(null);
     history = [];
+    setConvId(null);
     rerender();
-    convsSel.value = '';
     input.focus();
-  });
-
-  delBtn.addEventListener('click', async () => {
-    if (!convId) return;
-    if (!confirm('Cancellare questa conversazione?')) return;
-    await fetch('/conversations/' + convId, { method: 'DELETE' });
-    setConvId(null);
-    history = [];
-    rerender();
-    const list = await loadList();
-    if (list.length) loadConv(list[0].id);
   });
 
   form.addEventListener('submit', async (e) => {
@@ -274,8 +506,13 @@
     input.value = '';
     btn.disabled = true;
     addBubble(message, 'user');
-    const typing = addBubble('…', 'bot');
-    typing.classList.add('typing');
+    // Typing indicator: empty bubble with three pulsing dots driven by CSS.
+    // Build the DOM directly so the spans aren't fed through marked.parse.
+    const typing = document.createElement('div');
+    typing.className = 'msg bot typing';
+    typing.innerHTML = '<span></span><span></span><span></span>';
+    chat.appendChild(typing);
+    chat.scrollTop = chat.scrollHeight;
     try {
       const res = await fetch('/chat', {
         method: 'POST',
@@ -290,8 +527,8 @@
       const wasNew = !convId;
       setConvId(data.conversation_id);
       if (wasNew) await loadList();
-      convsSel.value = String(data.conversation_id);
     } catch (err) {
+      typing.classList.remove('typing');
       typing.textContent = 'Errore: ' + err.message;
     } finally {
       btn.disabled = false;
@@ -322,7 +559,6 @@
   let pendingFile = null;
   let dragCounter = 0;
 
-  // Populate datalist with current games
   async function refreshGameNames() {
     const res = await fetch('/games/names');
     const names = await res.json();

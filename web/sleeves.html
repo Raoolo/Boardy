@@ -154,6 +154,18 @@
     background: #11141a;
     padding: 14px 24px 16px;
   }
+  /* Inner wrapper: keeps the bar's background full-bleed but centers the
+     interactive content. Default ~820px (comfortable but visibly narrower
+     than the page); on focus-within it expands to 1152px — matches `main`'s
+     inner width (max-width 1200 minus 24px padding ×2), so the focused dock
+     edges line up exactly with the KPI tiles below. Slight overshoot ease
+     gives the "bouncy" feel. */
+  .smart-dock-inner {
+    max-width: 820px;
+    margin: 0 auto;
+    transition: max-width 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .smart-dock:focus-within .smart-dock-inner { max-width: 1152px; }
   .smart-dock h2 {
     margin: 0 0 10px; font-size: 15px; font-weight: 600;
     text-transform: none; letter-spacing: 0;
@@ -169,7 +181,17 @@
     padding: 9px 12px; font-size: 13px; font-family: inherit;
     line-height: 1.4;
   }
-  .smart-row textarea:focus { outline: none; border-color: var(--accent); }
+  /* Soft accent glow on focus — pairs with the bouncy width expansion to
+     make the "active chat" state visually distinct. Same treatment as
+     /library so the dock UX feels consistent across pages. */
+  .smart-row textarea {
+    transition: border-color 180ms ease, box-shadow 220ms ease;
+  }
+  .smart-row textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(95, 184, 120, 0.18);
+  }
   .smart-row .send {
     background: var(--accent-dim); color: var(--fg);
     border: 1px solid var(--accent); border-radius: 8px;
@@ -230,13 +252,15 @@
 </header>
 
 <section class="smart-dock">
-  <h2>💬 <span class="accent">Chat veloce</span> <span class="hint">— prova "aggiungi 100 buste 63.5×88 brand Mayday" o "quante buste mi mancano?"</span></h2>
-  <div class="smart-row">
-    <textarea id="chat-input" placeholder="Scrivi una richiesta in italiano…" rows="1"></textarea>
-    <button class="send" id="chat-send">Invia</button>
-    <button class="clear" id="chat-reset" title="Avvia nuova conversazione">Nuova chat</button>
+  <div class="smart-dock-inner">
+    <h2>💬 <span class="accent">Chat veloce</span> <span class="hint">— prova "aggiungi 100 buste 63.5×88 brand Mayday" o "quante buste mi mancano?"</span></h2>
+    <div class="smart-row">
+      <textarea id="chat-input" placeholder="Scrivi una richiesta in italiano…" rows="1"></textarea>
+      <button class="send" id="chat-send">Invia</button>
+      <button class="clear" id="chat-reset" title="Avvia nuova conversazione">Nuova chat</button>
+    </div>
+    <div class="smart-status" id="chat-status"></div>
   </div>
-  <div class="smart-status" id="chat-status"></div>
 </section>
 
 <main>
@@ -511,9 +535,29 @@ function setChatConvId(id) {
   else    localStorage.removeItem(CHAT_KEY);
 }
 
+// Flatten LLM markdown into a single readable line for the 2-row status
+// clamp. The assistant tends to reply with **bold** + bullet lists ("Fatto!
+// **100 buste** - Prima: 0 - Ora: 100"); textContent would surface those
+// tokens literally. We strip emphasis/code/links and turn list markers into
+// inline separators so the sentence reads naturally on one line.
+function stripMarkdown(s) {
+  if (!s) return "";
+  return String(s)
+    .replace(/```[\s\S]*?```/g, "")            // fenced code blocks
+    .replace(/`([^`]+)`/g, "$1")               // inline code
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")   // [text](url) → text
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")        // **bold** / __bold__
+    .replace(/(\*|_)(.*?)\1/g, "$2")           // *italic* / _italic_
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")        // headers
+    .replace(/^\s*[-*+]\s+/gm, "· ")           // bullet markers → middot
+    .replace(/\s*\n+\s*/g, " ")                // collapse newlines
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function setChatStatus(text, kind = "") {
   const el = document.getElementById("chat-status");
-  el.textContent = text;
+  el.textContent = stripMarkdown(text);
   el.className = `smart-status ${kind}`;
 }
 

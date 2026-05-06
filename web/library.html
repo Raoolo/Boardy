@@ -241,8 +241,20 @@
   .card .thumb img {
     width: 100%; height: 100%; object-fit: cover; display: block;
   }
+  /* Placeholder for games without a thumbnail. The hue is computed per-card
+     from a stable hash of the game name (see thumbHue() in JS) and injected
+     via the --hue CSS var, so each placeholder gets a unique-but-stable
+     color that reads as designed, not as "missing image". The initial sits
+     at low opacity to stay restrained against neighboring real thumbnails. */
   .card .thumb.placeholder {
-    color: var(--muted); font-size: 28px;
+    background: linear-gradient(135deg,
+      hsl(var(--hue, 200), 32%, 22%),
+      hsl(calc(var(--hue, 200) + 30), 28%, 13%));
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 56px; font-weight: 700;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    letter-spacing: -1px;
+    user-select: none;
   }
   .card .body {
     padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; flex: 1;
@@ -287,7 +299,18 @@
     padding: 9px 12px; font-size: 13px; font-family: inherit;
     line-height: 1.4;
   }
-  .smart-row textarea:focus { outline: none; border-color: var(--accent); }
+  /* Soft glow on focus instead of width change: aligns with the wide filter
+     bar / table below, but still gives visual feedback that the chat is
+     active. The shadow uses --accent-dim so it harmonizes with the table
+     hover states; transition keeps it from feeling abrupt. */
+  .smart-row textarea {
+    transition: border-color 180ms ease, box-shadow 220ms ease;
+  }
+  .smart-row textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(95, 184, 120, 0.18);
+  }
   .smart-row .send {
     background: var(--accent-dim); color: var(--fg);
     border: 1px solid var(--accent); border-radius: 8px;
@@ -621,9 +644,37 @@ function applyFilters() {
   render();
 }
 
+// Deterministic hue from the game name: sum of char codes mod 360. Same
+// name → same color across reloads, no random flicker, no extra storage.
+function thumbHue(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h + name.charCodeAt(i) * 31) % 360;
+  return h;
+}
+
+// First non-whitespace char of the name, uppercased. Works for digits too
+// ("7 Wonders" → "7"). The CSS gradient uses --hue from thumbHue().
+// We always set --hue and data-initial on the wrapper, even when an <img>
+// is present, so that a load failure can swap to the colored placeholder
+// in-place (see thumbFallback below).
 function cardThumb(g) {
-  if (g.thumbnail_url) return `<div class="thumb"><img src="${escapeHtml(g.thumbnail_url)}" alt="" loading="lazy" /></div>`;
-  return `<div class="thumb placeholder">🎲</div>`;
+  const initial = escapeHtml((g.name || "?").trim().charAt(0).toUpperCase());
+  const hue = thumbHue(g.name || "");
+  if (g.thumbnail_url) {
+    return `<div class="thumb" style="--hue:${hue}" data-initial="${initial}"><img src="${escapeHtml(g.thumbnail_url)}" alt="" loading="lazy" onerror="thumbFallback(this)" /></div>`;
+  }
+  return `<div class="thumb placeholder" style="--hue:${hue}">${initial}</div>`;
+}
+
+// Image failed to load (404, blocked, broken URL). Promote the wrapper to a
+// colored placeholder using the hue+initial we already stamped on it, and
+// drop the broken <img> so the browser doesn't draw its 1px broken-image
+// chrome on top.
+function thumbFallback(img) {
+  const wrap = img.parentElement;
+  if (!wrap) return;
+  wrap.classList.add("placeholder");
+  wrap.textContent = wrap.dataset.initial || "?";
 }
 
 function cardTitle(g) {
@@ -677,8 +728,11 @@ function renderGridCards() {
 }
 
 function render() {
-  document.getElementById("count").textContent =
-    `${state.filtered.length} / ${state.games.length} giochi`;
+  // Single count: shows visible (filtered) games. The "X/Y" form was
+  // confusing when nothing was filtered ("56/56 giochi" reads as "56 of
+  // what?"). Filter state is already obvious from the dropdowns / banner.
+  const n = state.filtered.length;
+  document.getElementById("count").textContent = `${n} ${n === 1 ? "gioco" : "giochi"}`;
 
   const tbl = document.getElementById("tbl");
   const grid = document.getElementById("grid");

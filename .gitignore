@@ -15,6 +15,7 @@ rulebooks/*.PDF
 
 # Generated ETL artifacts
 etl/unparsed.txt
+etl/.bgg_cache/
 
 # Python
 __pycache__/
