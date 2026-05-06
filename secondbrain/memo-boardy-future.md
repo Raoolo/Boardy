@@ -1,8 +1,55 @@
 # Boardy — Future Improvements Memo
 
-Last updated: 2026-05-01
+Last updated: 2026-05-06
 
 This file captures ideas you've shared that are out of scope for the current build but worth coming back to. When you ask "how can I improve Boardy?", start here.
+
+---
+
+## Status snapshot (2026-05-06)
+
+UI polish pass su tutte e tre le pagine, push come unico commit
+`UI polish pass across chat, library, sleeves`. Niente backend toccato —
+solo `web/*.html`.
+
+- ✅ **`/sleeves` markdown nello status-line** — chiusa la high-priority
+  segnalata il 2026-05-06: helper `stripMarkdown()` flatten le risposte
+  dell'assistant in single-line plain text per il clamp 2-row.
+- ✅ **`/sleeves` dock bouncy con focus glow** — wrapper interno
+  `max-width: 820px` → `1152px` su `:focus-within`, easing
+  `cubic-bezier(0.34, 1.56, 0.64, 1)`. Soft accent glow `box-shadow`
+  sulla textarea sul focus.
+- ✅ **`/library` dock focus glow** — stesso glow ma senza expand
+  (la tabella sotto è larga: cambiare width avrebbe creato dissonanza).
+- ✅ **`/library` placeholder grid colorati** — hash-hue dal nome +
+  iniziale, con `onerror` handler che converte `<img>` rotti in
+  placeholder in-place. Risolto il bug "quadrati neri con bordino bianco"
+  per Here To Slay / HeroQuest / Room 25 che hanno `thumbnail_url`
+  impostato ma fetch fallito.
+- ✅ **`/library` count "N giochi"** — droppato "X/Y giochi" che
+  l'utente ha definito "non ha senso" quando X==Y.
+- ✅ **`/` chat full overhaul** — sidebar con conv-list al posto del
+  `<select>` nativo, `×` hover-reveal per delete, custom Promise-based
+  `confirmDialog()` al posto di `confirm()`. Header allineato a
+  `/library` e `/sleeves`. Bolle utente con `--accent-dim` (Boardy
+  green), bordo `--accent`. Typing dots animati a tre puntini, fade-in
+  `bubble-in 200ms` su ogni `.msg`. Focus glow sull'input.
+
+### Cosa resta aperto (priorità invariata)
+
+- 🔴 **"Powered by BGG" logo** — compliance dei termini d'uso BGG XML
+  API. Da fare prima di esporre Boardy fuori da localhost.
+- 🟡 Voice input, OCR fallback, chunking tabellare (immutati).
+- 🟢 Cinque nuovi item "spice" aggiunti il 2026-05-06: empty-state chat
+  con prompt suggeriti, riassunto LLM del titolo conversazione,
+  keyboard shortcuts, sidebar conv-search, easter egg `/dado` o
+  `/random-game`. Tutti documentati in `TODO.md` con costo stimato e
+  pointer ai file.
+- 🟢 **Guest mode + auth (CV/portfolio)** — nuovo TODO 2026-05-06,
+  pre-requisito per il self-host pubblico. Decisioni aperte su auth
+  provider (Cloudflare Access vs JWT vs OAuth), strategia sandbox per
+  guest writes (no-op vs DB shadow vs in-memory), UI banner + lock sui
+  pulsanti destructive, rate-limit per evitare burn di token Anthropic.
 
 ---
 

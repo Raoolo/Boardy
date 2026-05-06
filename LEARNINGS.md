@@ -5,6 +5,95 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-05-06 — UI polish pass: gotchas e preferenze del proprietario
+
+Sessione di refactor estetico su tutte e tre le pagine (`/`, `/library`,
+`/sleeves`). Cose che vale la pena ricordare per il prossimo lavoro UI.
+
+### Gotcha — `<img>` con URL valorizzato ma broken
+Il filtro `if (g.thumbnail_url) <img>` non basta: se l'URL è 404 / CDN morto /
+cookie-gated, il browser disegna comunque un chrome di 1px ("bordino bianco
+orrendo" — feedback testuale del proprietario su Here to Slay, HeroQuest,
+Room 25, che hanno `thumbnail_url` impostato ma la GET fallisce).
+
+**Pattern fix** (in `web/library.html`):
+1. Stampa sempre `data-initial` e `--hue` sul `<div class="thumb">` wrapper,
+   anche quando metti l'`<img>` dentro.
+2. `<img onerror="thumbFallback(this)">` promuove il wrapper in placeholder
+   in-place: `wrap.classList.add('placeholder')` + `wrap.textContent = wrap.dataset.initial`.
+3. Niente refetch, niente skip silenzioso, niente broken-image chrome.
+
+Generalizzabile a qualunque CDN-backed thumbnail in futuro.
+
+### Pattern — full-bleed bar che si allinea con `main` sotto
+La dock di `/sleeves` ha background full-width ma contenuto centrato che deve
+combaciare con i KPI sotto a tutte le viewport.
+
+**Trucco**: stesso `padding-x` orizzontale sulla bar (24px) e su `main`
+(24px), poi sul wrapper interno della bar imposta `max-width = main_max -
+2*padding` (cioè 1200 - 48 = 1152px) + `margin: 0 auto`. Risultato: gli edge
+sono identici a viewport pieno e collassano insieme su viewport stretto
+(entrambi diventano `viewport - 48px`).
+
+`:focus-within` + transition su `max-width` con cubic-bezier overshoot
+(`0.34, 1.56, 0.64, 1`) dà l'effetto "bouncy" CSS-only — zero JS, zero
+listener.
+
+### Decision — colori bolla utente prendono dalle CSS vars del brand
+Iterazione cromatica su `--user`: prima slate freddo (`#2c3a4d`, troppo
+simile al bot), poi verde-slate desaturato (`#2d4a37`, "smorto"), poi più
+saturo (`#335a40`, "ancora un po' più vivo"), infine `var(--accent-dim)` /
+`var(--accent)` direttamente.
+
+**Regola**: se serve un verde in qualunque contesto (bolla, bottone,
+hover), pescalo dalle custom properties esistenti. Niente più hex
+hand-tuned: l'iterazione manuale è dispendiosa e crea drift cromatico.
+Le palette vars stanno in cima al `:root` — `--accent`, `--accent-dim`,
+`--user`, `--bot`, `--user-edge`, `--bot-edge`.
+
+### Preferenze proprietario (regole stabili)
+Confermate questa sessione, applicarle d'ufficio nei prossimi lavori UI:
+
+1. **Niente `confirm()` / `alert()` nativi** — sempre custom modal
+   Promise-based. Helper di riferimento: `confirmDialog()` in
+   `web/index.html` (gestisce Esc, Enter, click sullo sfondo, focus
+   automatico sul bottone primario, cleanup listener). Riutilizzabile.
+
+2. **Header coerenti su tutte le pagine** — stesso padding (`14px 24px`),
+   stessa h1 (`20px`, suffisso `· Chat`/`· Libreria`/`· Buste`), stesso
+   ordine `h1 + nav + spacer`, stessa classe `.active` sul link corrente.
+   Quando si crea/refattorizza una pagina, allineare anche le altre.
+
+3. **Conteggi non ridondanti** — "56/56 giochi" è stato esplicitamente
+   bocciato come "non ha senso". Mostrare un numero solo quando il
+   denominatore non aggiunge informazione. La filter-state è già visibile
+   dai dropdown / banner semantico.
+
+4. **Empty-state non vuoti** (TODO low-priority ma flag esplicito):
+   l'utente ha chiesto un empty-state con prompt suggeriti per la chat.
+   Generalizzabile: dove c'è un "primo schermo vuoto" pensare a un seed
+   visivo (chip, splash, microcopy).
+
+5. **Animazioni "bouncy" piacciono** — l'ovvio: cubic-bezier con overshoot
+   leggero sul focus dock è stato accolto bene. Gli stessi parametri
+   funzionano per qualunque "expand on focus" futuro.
+
+### Status piccoli pattern che hanno funzionato
+- **`stripMarkdown()` per status-line clamp** (`/sleeves`): regex chain
+  che converte `**bold**` / `[text](url)` / list markers in plain
+  inline-text. Da usare ovunque un componente ha clamp 1-2 righe ma
+  riceve markdown grezzo dal modello.
+- **Hash-hue placeholder**: `sum(charCode * 31) % 360` → HSL deterministico
+  da una stringa. 4 righe, niente librerie, output stabile. Riutilizzabile
+  per qualunque "iniziale colorata su sfondo unico-ma-stabile" (avatar
+  utenti, tag, categorie).
+- **Sidebar conv-list con hover-reveal `×`**: `.conv-del { opacity: 0 }`
+  + `.conv-item:hover .conv-del { opacity: 1 }`. Discoverability via
+  hover, niente clutter. Pattern adottabile per qualunque list-row con
+  azione destructive secondaria.
+
+---
+
 ## 2026-05-04 — ETL upsert + name-divergence gotcha
 
 ### TL;DR
