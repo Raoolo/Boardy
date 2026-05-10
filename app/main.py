@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import conversations as conv
@@ -29,12 +30,15 @@ LIBRARY = ROOT / "web" / "library.html"
 SLEEVES = ROOT / "web" / "sleeves.html"
 RULEBOOKS_DIR = ROOT / "rulebooks"
 RULEBOOKS_DIR.mkdir(exist_ok=True)
+STATIC_DIR = ROOT / "web" / "static"
+STATIC_DIR.mkdir(exist_ok=True)
 
 
 def _safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "file"
 
 app = FastAPI(title="Boardy")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 class ChatRequest(BaseModel):

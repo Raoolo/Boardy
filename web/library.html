@@ -34,6 +34,17 @@
   }
   nav a:hover, header a:hover { color: var(--accent); border-color: var(--accent); }
   nav a.active { color: var(--accent); border-color: var(--accent); }
+
+  /* BGG attribution — required by XML API ToU for public-facing apps.
+     Whisper-quiet: no border, transparent bg, low opacity, small logo. */
+  footer.bgg-attr {
+    padding: 8px 24px;
+    display: flex; justify-content: flex-end; align-items: center;
+    background: transparent;
+  }
+  footer.bgg-attr a { display: inline-flex; opacity: 0.55; transition: opacity 150ms ease; }
+  footer.bgg-attr a:hover { opacity: 1; }
+  footer.bgg-attr img { height: 16px; width: auto; display: block; }
   #count { color: var(--muted); font-size: 13px; }
 
   /* Filter bar */
@@ -1084,5 +1095,10 @@ document.querySelectorAll("th[data-sort]").forEach(th => {
 
 load();
 </script>
+<footer class="bgg-attr">
+  <a href="https://boardgamegeek.com/" target="_blank" rel="noopener" title="Powered by BoardGameGeek">
+    <img src="/static/powered-by-bgg-rgb.svg" alt="Powered by BGG">
+  </a>
+</footer>
 </body>
 </html>
