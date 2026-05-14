@@ -332,6 +332,14 @@
   </nav>
   <span class="spacer"></span>
 </header>
+<script src="/static/auth.js"></script>
+<script>
+  (async () => {
+    await BoardyAuth.state();
+    BoardyAuth.mountBadge(document.querySelector('header'));
+    if (!BoardyAuth.isOwner()) document.body.classList.add('guest-mode');
+  })();
+</script>
 
 <section class="smart-dock">
   <div class="smart-dock-inner">

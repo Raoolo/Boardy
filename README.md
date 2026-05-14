@@ -17,6 +17,7 @@ Single-user, runs on `localhost`, no cloud DB, no build step.
 - 🕒 **Full audit trail** — every write logged with old/new values, source, and timestamp; ask *"quando ho aggiunto Concordia?"* and get the truth from the log
 - 🔎 **Trusted web search** — when the model needs external info, it's restricted to BGG, publisher sites, and a sleeve-database allowlist
 - 💬 **Persistent conversations** — full chat history server-side, switchable via a dropdown
+- 🔐 **Guest mode + owner login** — visitors browse read-only and chat with the bot (chat ephemera, no DB write); owners log in via cookie to add/edit. Owners share a single collection; the audit log records who did what.
 
 ## Tech stack
 
@@ -65,16 +66,22 @@ Single-user, runs on `localhost`, no cloud DB, no build step.
 # 1. Install deps
 uv sync
 
-# 2. Set your API key in a .env file at repo root
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+# 2. Copy .env.example to .env and fill the keys you need
+cp .env.example .env  # then edit: ANTHROPIC_API_KEY / DEEPSEEK_API_KEY / TAVILY_API_KEY / BGG_API_TOKEN
 
-# 3. Import your Excel inventory (upsert by name — preserves chat-added games and BGG enrichment)
+# 3. (Optional, only if exposing the UI) generate a session secret for owner login
+echo "BOARDY_SESSION_SECRET=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" >> .env
+
+# 4. Import your Excel inventory (upsert by name — preserves chat-added games and BGG enrichment)
 uv run python etl/import_excel.py
 
-# 4. Run the server
+# 5. Run the server
 uv run uvicorn app.main:app --port 8765
 
-# 5. Open http://localhost:8765
+# 6. (Optional) create owner users to enable write actions from the UI
+uv run python etl/create_user.py create raulo   # prompts for password (getpass)
+
+# 7. Open http://localhost:8765 — landing is guest (read-only). Click "Accedi" to log in.
 ```
 
 > **First run note:** the embedding model (~280MB, ~1GB cache) downloads once to `~/.cache/huggingface/`. Subsequent loads take ~3s.

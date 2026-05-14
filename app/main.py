@@ -7,16 +7,18 @@ from dotenv import load_dotenv
 import re
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import auth
 from . import conversations as conv
 from . import games_semantic as gs
 from . import schema
 from . import rulebooks as rb
 from . import tools as tools_mod
+from .auth import get_current_user, require_owner
 from .chat import chat
 from .db import get_conn
 
@@ -29,6 +31,7 @@ INDEX = ROOT / "web" / "index.html"
 LIBRARY = ROOT / "web" / "library.html"
 SLEEVES = ROOT / "web" / "sleeves.html"
 WISHLIST = ROOT / "web" / "wishlist.html"
+LOGIN = ROOT / "web" / "login.html"
 RULEBOOKS_DIR = ROOT / "rulebooks"
 RULEBOOKS_DIR.mkdir(exist_ok=True)
 STATIC_DIR = ROOT / "web" / "static"
@@ -45,11 +48,15 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 class ChatRequest(BaseModel):
     message: str
     conversation_id: int | None = None
+    # Guest path: client invia l'intero history ogni turno (vive in sessionStorage).
+    # Ignorato se conversation_id e' impostato (owner: history caricato dal DB).
+    history: list[dict] | None = None
 
 
 class ChatResponse(BaseModel):
     reply: str
     history: list[dict]
+    # 0 per chat guest ephemera (non persistita); >0 per chat owner.
     conversation_id: int
 
 
@@ -58,8 +65,59 @@ def index() -> FileResponse:
     return FileResponse(INDEX)
 
 
+# ── Auth ─────────────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.get("/login")
+def login_page() -> FileResponse:
+    return FileResponse(LOGIN)
+
+
+@app.post("/auth/login")
+def auth_login(req: LoginRequest, response: Response) -> dict:
+    user = auth.authenticate(req.username, req.password)
+    if user is None:
+        # Stesso messaggio per user inesistente e password sbagliata
+        # (evita user enumeration).
+        raise HTTPException(401, "credenziali non valide")
+    auth.set_session_cookie(response, user)
+    return {"username": user["username"], "role": user["role"]}
+
+
+@app.post("/auth/logout")
+def auth_logout(response: Response) -> dict:
+    auth.clear_session_cookie(response)
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+def auth_me(user: dict | None = Depends(get_current_user)) -> dict:
+    """Discovery endpoint: il frontend lo chiama al boot per decidere se
+    mostrare 'Guest · Accedi' o 'username · Esci'."""
+    if user is None:
+        return {"authenticated": False}
+    return {"authenticated": True, "username": user["username"], "role": user["role"]}
+
+
 @app.post("/chat", response_model=ChatResponse)
-def chat_endpoint(req: ChatRequest) -> ChatResponse:
+def chat_endpoint(
+    req: ChatRequest,
+    user: dict | None = Depends(get_current_user),
+) -> ChatResponse:
+    if user is None:
+        # Guest: chat ephemera lato client. NON creiamo conversation_id,
+        # NON salviamo nulla. Il client invia l'intero history a ogni turno
+        # (vive in sessionStorage del browser, sparisce al refresh).
+        # Tool gating: chat() filtra fuori i write tools quando user=None.
+        history = req.history or []
+        reply, history = chat(req.message, history, conversation_id=None, user=None)
+        return ChatResponse(reply=reply, history=history, conversation_id=0)
+
+    # Owner: chat condivisa tra owner, persistita in `conversations`.
     conv_id = req.conversation_id
     if conv_id is None:
         conv_id = conv.create_conversation()
@@ -70,18 +128,21 @@ def chat_endpoint(req: ChatRequest) -> ChatResponse:
             raise HTTPException(404, f"conversation {conv_id} not found")
         history = loaded["history"]
 
-    reply, history = chat(req.message, history, conversation_id=conv_id)
+    reply, history = chat(req.message, history, conversation_id=conv_id, user=user)
     conv.save_conversation(conv_id, history)
     return ChatResponse(reply=reply, history=history, conversation_id=conv_id)
 
 
+# Conversations sidebar: solo owner. Guest non ha sidebar (chat ephemera client-side).
 @app.get("/conversations")
-def list_conversations() -> list[dict]:
+def list_conversations(user: dict | None = Depends(get_current_user)) -> list[dict]:
+    require_owner(user)
     return conv.list_conversations()
 
 
 @app.get("/conversations/{conv_id}")
-def get_conversation(conv_id: int) -> dict:
+def get_conversation(conv_id: int, user: dict | None = Depends(get_current_user)) -> dict:
+    require_owner(user)
     c = conv.get_conversation(conv_id)
     if c is None:
         raise HTTPException(404, f"conversation {conv_id} not found")
@@ -89,7 +150,8 @@ def get_conversation(conv_id: int) -> dict:
 
 
 @app.delete("/conversations/{conv_id}")
-def delete_conversation(conv_id: int) -> dict:
+def delete_conversation(conv_id: int, user: dict | None = Depends(get_current_user)) -> dict:
+    require_owner(user)
     conv.delete_conversation(conv_id)
     return {"ok": True}
 
@@ -448,15 +510,19 @@ class InventoryDeltaRequest(BaseModel):
 
 
 @app.post("/sleeves/inventory/delta")
-def sleeves_inventory_delta(req: InventoryDeltaRequest) -> dict:
+def sleeves_inventory_delta(
+    req: InventoryDeltaRequest,
+    user: dict | None = Depends(get_current_user),
+) -> dict:
     """Apply a +N / -N delta to a sleeve inventory row. Audit-logged as `web:sleeves`.
 
     Wraps `tools.add_to_inventory` so the math runs server-side and a negative
     result raises an explicit error instead of silently going below zero.
     """
+    require_owner(user)
     result = tools_mod.add_to_inventory(
         width_mm=req.width_mm, height_mm=req.height_mm, delta=req.delta,
-        brand=req.brand, note=req.note, _source="web:sleeves",
+        brand=req.brand, note=req.note, _source=f"web:sleeves/user:{user['username']}",
     )
     if "error" in result:
         raise HTTPException(400, result["error"])
@@ -471,14 +537,18 @@ class InventoryUpsertRequest(BaseModel):
 
 
 @app.post("/sleeves/inventory/upsert")
-def sleeves_inventory_upsert(req: InventoryUpsertRequest) -> dict:
+def sleeves_inventory_upsert(
+    req: InventoryUpsertRequest,
+    user: dict | None = Depends(get_current_user),
+) -> dict:
     """Upsert an inventory row (absolute count). Used by the 'add new size' form."""
+    require_owner(user)
     if req.count_owned < 0:
         raise HTTPException(400, "count_owned must be >= 0")
     return tools_mod.update_inventory(
         width_mm=req.width_mm, height_mm=req.height_mm,
         count_owned=req.count_owned, brand=req.brand,
-        _source="web:sleeves",
+        _source=f"web:sleeves/user:{user['username']}",
     )
 
 
@@ -533,14 +603,18 @@ class WishlistAddRequest(BaseModel):
 
 
 @app.post("/wishlist/add")
-def wishlist_add(req: WishlistAddRequest) -> dict:
+def wishlist_add(
+    req: WishlistAddRequest,
+    user: dict | None = Depends(get_current_user),
+) -> dict:
     """Minimal add path from the page form. No BGG enrichment here — that flow
     goes through chat. The UI is for quick-capture; the chat is for the full
     confirm-then-add ritual."""
+    require_owner(user)
     result = tools_mod.add_to_wishlist(
         name=req.name, priority=req.priority,
         notes_wishlist=req.notes_wishlist, target_price=req.target_price,
-        _source="web:wishlist",
+        _source=f"web:wishlist/user:{user['username']}",
     )
     if "error" in result:
         raise HTTPException(400, result["error"])
@@ -555,11 +629,15 @@ class WishlistUpdateRequest(BaseModel):
 
 
 @app.post("/wishlist/update")
-def wishlist_update(req: WishlistUpdateRequest) -> dict:
+def wishlist_update(
+    req: WishlistUpdateRequest,
+    user: dict | None = Depends(get_current_user),
+) -> dict:
+    require_owner(user)
     result = tools_mod.update_wishlist(
         name=req.name, priority=req.priority,
         notes_wishlist=req.notes_wishlist, target_price=req.target_price,
-        _source="web:wishlist",
+        _source=f"web:wishlist/user:{user['username']}",
     )
     if "error" in result:
         raise HTTPException(400, result["error"])
@@ -572,11 +650,15 @@ class WishlistBuyRequest(BaseModel):
 
 
 @app.post("/wishlist/buy")
-def wishlist_buy(req: WishlistBuyRequest) -> dict:
+def wishlist_buy(
+    req: WishlistBuyRequest,
+    user: dict | None = Depends(get_current_user),
+) -> dict:
     """Promote wishlist → owned. Returns the updated row."""
+    require_owner(user)
     result = tools_mod.mark_as_owned(
         name=req.name, sleeve_status=req.sleeve_status,
-        _source="web:wishlist",
+        _source=f"web:wishlist/user:{user['username']}",
     )
     if "error" in result:
         raise HTTPException(400, result["error"])
@@ -588,8 +670,14 @@ class WishlistRemoveRequest(BaseModel):
 
 
 @app.post("/wishlist/remove")
-def wishlist_remove(req: WishlistRemoveRequest) -> dict:
-    result = tools_mod.remove_from_wishlist(name=req.name, _source="web:wishlist")
+def wishlist_remove(
+    req: WishlistRemoveRequest,
+    user: dict | None = Depends(get_current_user),
+) -> dict:
+    require_owner(user)
+    result = tools_mod.remove_from_wishlist(
+        name=req.name, _source=f"web:wishlist/user:{user['username']}",
+    )
     if "error" in result:
         raise HTTPException(400, result["error"])
     return result
@@ -599,7 +687,9 @@ def wishlist_remove(req: WishlistRemoveRequest) -> dict:
 async def upload_rulebook(
     game_name: str = Form(...),
     file: UploadFile = File(...),
+    user: dict | None = Depends(get_current_user),
 ) -> dict:
+    require_owner(user)
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "expected a .pdf file")
     safe = _safe_filename(file.filename)

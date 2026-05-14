@@ -35,11 +35,12 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 
 ## Where to look
 
-- `app/main.py` — FastAPI entry point. All REST endpoints (`/chat`, `/conversations/*`, `/sleeves/*`, `/library/*`, `/wishlist/*`, `/games/*`) + StaticFiles mount. First file to read when adding a new route.
-- `app/chat.py` — provider-agnostic tool-use loop, up to 8 rounds. Auto-injects `_source="chat:{conv_id}"` into write tools via `inspect.signature`.
-- `app/tools.py` — all tools. Adding one = function + JSON schema in `TOOLS` + entry in `TOOL_FUNCS`. Write tools must declare `_source: str | None = None`.
+- `app/main.py` — FastAPI entry point. All REST endpoints (`/chat`, `/conversations/*`, `/sleeves/*`, `/library/*`, `/wishlist/*`, `/games/*`, `/auth/*`) + StaticFiles mount. First file to read when adding a new route.
+- `app/auth.py` — username/password locale + cookie firmato (bcrypt diretto + itsdangerous). Espone `get_current_user` (FastAPI dependency, ritorna `dict | None`) e `require_owner(user)` per gate dei write endpoint. Hash/verify password truncano a 72 bytes (limite bcrypt).
+- `app/chat.py` — provider-agnostic tool-use loop, up to 8 rounds. Auto-injects `_source="chat:{conv_id}/user:{username}"` (or `/guest`) into write tools via `inspect.signature`. Filtra `TOOLS` per ruolo: guest vede solo i read tools (vedi `tools.WRITE_TOOLS`).
+- `app/tools.py` — all tools. Adding one = function + JSON schema in `TOOLS` + entry in `TOOL_FUNCS`. Write tools must declare `_source: str | None = None` AND be added to `WRITE_TOOLS` set (source of truth per il gating guest/owner — non basta l'euristica `_source` perché `ingest_rulebook` scrive ma non ha `_source`).
 - `app/llm.py` — `Provider` ABC with three impls: `AnthropicProvider` (`claude-sonnet-4-6`), `DeepSeekProvider` (`deepseek-chat`, OpenAI-compatible — **current production default per `.env`**, ~10× cheaper than Sonnet), `OllamaProvider` (local, archived — see memory). Selection per-request via `LLM_PROVIDER`. Web search is client-side (Tavily tool in `app/tools.py`) — no provider-specific search anymore. `/library/filter` is hardcoded to `deepseek-chat` (override via `LIBRARY_FILTER_MODEL`).
-- `app/schema.py` — star schema DDL + idempotent v1→v6 migration on every boot (latest: wishlist `status` col).
+- `app/schema.py` — star schema DDL + idempotent v1→v7 migration on every boot (latest: `users` table for owner login).
 - `app/audit.py` — every write to `games`/`sleeve_requirements`/`sleeve_inventory` logs to `changes`.
 - `app/conversations.py` — server-side conversation persistence + `_title_from_history` (currently truncates first user msg; see TODO).
 - `app/db.py` — SQLite connection. Reads env `BOARDY_DB` (Docker volume path); falls back to `<repo>/boardy.db`.
@@ -49,6 +50,8 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - `web/library.html` — library page: grid/table toggle, multi-select category/mechanic filters, smart-filter chatbot (`/library/filter`).
 - `web/sleeves.html` — sleeve dashboard: KPI cards, Da comprare, Buste future (wishlist preview), Pronti da sleevare, mini-chat dock.
 - `web/wishlist.html` — wishlist page: grid+table, priority chips, Promise-based confirm modal for buy/remove, chat dock.
+- `web/login.html` — standalone login form (POST `/auth/login` → set cookie → redirect `?next=...`). No nav, no sidebar; matches the dark theme.
+- `web/static/auth.js` — shared client helper (`BoardyAuth.state()`, `mountBadge(headerEl)`, `isOwner()`, `logout()`). Caricato da tutte le 4 pagine via `<script src="/static/auth.js"></script>` per il chip auth in topbar.
 
 ## Companion docs (read before non-trivial work)
 
@@ -71,6 +74,7 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - **E5 multilingual thresholds**: ≥0.78 strong, 0.72–0.77 borderline, <0.72 noise. Lower than English-only — IT/EN trade-off.
 - **Wishlist fence on read tools.** `games.status` is `'owned' | 'wishlist'` in a single table. Read tools (`list_games`, `sleeve_summary`, `search_games_semantic`, `library_data`, `games_names`) MUST default to `status='owned'`. Opt-in via `status='wishlist'`/`'any'` where it makes sense. Forgetting this leaks wishlist into collection counts.
 - **BGG media backfill hook fires post-write.** `_backfill_bgg_media(gid)` is called from `add_game`, `update_game`, `add_to_wishlist`, `update_wishlist` to patch `thumbnail_url`/`image_url` via `etl/bgg_api.fetch_thing()` when `bgg_id` is set but URLs are empty. If you add a write tool that mutates `bgg_id`, call the hook too.
+- **Auth model: guest = read-only, owner = full.** Due ruoli. Guest (no cookie) vede tutto in read mode + può chattare (tool gating: write tools rimossi dal registry prima del loop). Owner (cookie firmato) può scrivere; chat condivisa tra owner. Quando aggiungi un endpoint che scrive su DB/fs **devi** mettere `user: dict | None = Depends(get_current_user)` + `require_owner(user)` come prima riga; quando aggiungi un tool che muta stato **devi** aggiungerlo a `tools.WRITE_TOOLS`. Audit `_source` formato: `chat:{id}/user:{name}` (chat owner), `web:{page}/user:{name}` (REST owner), `chat:guest` (chat guest). Per gestire utenti: `uv run python etl/create_user.py create|reset|list`.
 
 ## Environment
 
@@ -81,6 +85,8 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - `LIBRARY_FILTER_MODEL` — override the DeepSeek model used by `/library/filter` (default `deepseek-chat`).
 - `BGG_API_TOKEN` — required since 2026-04 (BGG XML API is Cloudflare-gated, both v1 and v2). Public-page scraping via web_search was tried and failed (JS-rendered widgets — see LEARNINGS).
 - `BOARDY_DB` — optional, overrides DB path. Used by `docker-compose.yml` to point at `/data/boardy.db` (named volume). Defaults to `<repo>/boardy.db`.
+- `BOARDY_SESSION_SECRET` — **required** in production. Chiave per firmare il cookie di sessione owner. Genera con `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Senza, l'app crasha al primo `/auth/login`. Ruotarla invalida tutti i cookie esistenti (logout globale).
+- `BOARDY_COOKIE_SECURE` — `1` in produzione HTTPS (cookie marcato `Secure`, browser rifiuta su HTTP); lascia unset in dev locale (`http://localhost`).
 - `CF_TUNNEL_TOKEN` — Cloudflare Tunnel token. Required ONLY for `docker compose --profile tunnel` (self-host deploy). Generated by the tunnel owner in the CF dashboard (Zero Trust → Networks → Tunnels → Create → token).
 - First run downloads ~1GB to `~/.cache/huggingface/` for the e5 model. Subsequent loads ~3s. In the Docker image the model is pre-cached at build time → no first-boot download.
 

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<title>Boardy · Accedi</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115; --fg: #e6e7eb; --muted: #8a8f99;
+    --accent: #5fb878; --accent-dim: #3a7c4f;
+    --border: #222831; --field: #181b22; --field-edge: #2a2f3a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 360px;
+    background: var(--field);
+    border: 1px solid var(--field-edge);
+    border-radius: 14px;
+    padding: 28px 28px 24px;
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; font-weight: 600; }
+  h1 .accent { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 22px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  input {
+    width: 100%; padding: 10px 12px;
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 8px;
+    font-family: inherit; font-size: 14px; margin-bottom: 14px;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  button {
+    width: 100%; padding: 10px;
+    background: var(--accent-dim); color: var(--fg);
+    border: 1px solid var(--accent); border-radius: 8px;
+    font-size: 14px; cursor: pointer; font-family: inherit;
+    transition: background 150ms ease;
+  }
+  button:hover { background: var(--accent); color: #0f1115; }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  .err {
+    color: #e74c3c; font-size: 13px; margin-top: 10px;
+    min-height: 18px;
+  }
+  .back {
+    margin-top: 18px; text-align: center; font-size: 13px;
+  }
+  .back a { color: var(--muted); text-decoration: none; }
+  .back a:hover { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Bo<span class="accent">ardy</span> · Accedi</h1>
+  <p class="sub">Login owner. I guest navigano senza account.</p>
+  <form id="loginForm" autocomplete="on">
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username" required autofocus />
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required />
+    <button id="submitBtn" type="submit">Entra</button>
+    <div class="err" id="err"></div>
+  </form>
+  <div class="back"><a href="/">← Torna alla home (come guest)</a></div>
+</div>
+<script>
+  const form = document.getElementById('loginForm');
+  const errEl = document.getElementById('err');
+  const submitBtn = document.getElementById('submitBtn');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errEl.textContent = '';
+    submitBtn.disabled = true;
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    try {
+      const r = await fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        errEl.textContent = body.detail || 'Credenziali non valide.';
+        submitBtn.disabled = false;
+        return;
+      }
+      // Login ok → redirect alla home (cookie e' stato gia' impostato dalla response).
+      const next = new URLSearchParams(location.search).get('next') || '/';
+      location.href = next;
+    } catch (e) {
+      errEl.textContent = 'Errore di rete. Riprova.';
+      submitBtn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

@@ -19,7 +19,7 @@ import sys
 from typing import Any
 
 from .llm import TextBlock, ToolUseBlock, get_provider
-from .tools import TOOL_FUNCS, TOOLS
+from .tools import TOOL_FUNCS, TOOLS, WRITE_TOOLS
 
 
 @functools.cache
@@ -29,6 +29,28 @@ def _accepts_source(name: str) -> bool:
     if fn is None:
         return False
     return "_source" in inspect.signature(fn).parameters
+
+
+def _tool_name(t: dict) -> str:
+    """Estrae il nome dal TOOL spec sia in shape Anthropic ({'name': ...})
+    sia in shape OpenAI/DeepSeek ({'type': 'function', 'function': {'name': ...}}).
+    """
+    return t.get("name") or t.get("function", {}).get("name", "")
+
+
+def _filter_tools_for_user(tools: list[dict], user: dict | None) -> list[dict]:
+    """Filtra il registry TOOLS in base al ruolo.
+
+    Guest (user=None) vede solo i read tools — i write tools sono rimossi
+    dallo schema, il modello non sa nemmeno che esistono e quindi non puo'
+    "provare e fallire". Owner vede tutto.
+
+    La verita' sta in `tools.WRITE_TOOLS` (set esplicito) — vedi commento la'
+    sul perche' non basta l'euristica `_accepts_source`.
+    """
+    if user is not None:
+        return tools
+    return [t for t in tools if _tool_name(t) not in WRITE_TOOLS]
 
 
 MAX_TOOL_ROUNDS = 8
@@ -393,27 +415,48 @@ def _summarize_result(value: Any, serialized: str) -> str:
 
 
 def chat(user_message: str, history: list[dict] | None = None,
-         conversation_id: int | None = None) -> tuple[str, list[dict]]:
+         conversation_id: int | None = None,
+         user: dict | None = None) -> tuple[str, list[dict]]:
     """Run one user turn through the configured LLM with tool-use.
 
-    Returns (reply_text, updated_history). History is appended to in place
-    style (we return the new list).
+    Args:
+      user_message: testo dell'utente di questo turno.
+      history: storico del turno precedente (o []).
+      conversation_id: ID nel DB se persistita (None per guest ephemera).
+      user: dict {'id','username','role'} se autenticato, None se guest.
+            Determina QUALI tool sono esposti al modello e cosa va nel
+            `_source` del audit log.
+
+    Returns (reply_text, updated_history).
     """
     provider = get_provider()
     history = list(history or [])
     history.append({"role": "user", "content": user_message})
-    source = f"chat:{conversation_id}" if conversation_id is not None else "chat:?"
+
+    # Source per audit log: chi ha originato la write call.
+    # - Owner loggato: chat:{id}/user:{nome} → sappiamo chi ha aggiunto/cambiato.
+    # - Guest: chat:guest (non potra' nemmeno chiamare write tools, ma teniamo
+    #   la stringa coerente per qualunque write futuro che dovesse aprirsi).
+    if user is not None:
+        source = f"chat:{conversation_id if conversation_id is not None else '?'}/user:{user['username']}"
+    elif conversation_id is not None:
+        source = f"chat:{conversation_id}/guest"
+    else:
+        source = "chat:guest"
+
     system_prompt = _build_system_prompt(provider.prefer_slim_prompt)
+    tools_visible = _filter_tools_for_user(TOOLS, user)
 
     conv = conversation_id if conversation_id is not None else "?"
+    user_label = user["username"] if user else "guest"
     user_preview = user_message.replace("\n", " ")
     if len(user_preview) > 80:
         user_preview = user_preview[:77] + "…"
-    _log(f"conv={conv} provider={provider.name} model={getattr(provider, 'model', '?')} "
-         f"user={user_preview!r}")
+    _log(f"conv={conv} as={user_label} provider={provider.name} model={getattr(provider, 'model', '?')} "
+         f"tools={len(tools_visible)}/{len(TOOLS)} user={user_preview!r}")
 
     for round_idx in range(1, MAX_TOOL_ROUNDS + 1):
-        resp = provider.run_turn(history, system_prompt, TOOLS)
+        resp = provider.run_turn(history, system_prompt, tools_visible)
         history.append(resp.assistant_history_entry)
 
         n_text = sum(1 for b in resp.blocks if isinstance(b, TextBlock))

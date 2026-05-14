@@ -16,6 +16,10 @@ dependencies = [
     "numpy>=1.26.0",
     "openai>=2.33.0",
     "tavily-python>=0.5.0",
+    # Auth (login/sessione cookie firmato). bcrypt 5+ diretto, no passlib
+    # (passlib 1.7.4 e' incompatibile con bcrypt>=5 — vedi app/auth.py).
+    "bcrypt>=4.0.0",
+    "itsdangerous>=2.2.0",
 ]
 
 [tool.uv]

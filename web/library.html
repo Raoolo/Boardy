@@ -385,6 +385,17 @@
   <span id="count"></span>
   <span class="spacer"></span>
 </header>
+<script src="/static/auth.js"></script>
+<script>
+  // Auth badge: chip "Guest · Accedi" / "username · Esci" in topbar.
+  // Eseguito subito (non in DOMContentLoaded) — la header esiste gia'
+  // perche' lo script e' dopo il tag.
+  (async () => {
+    await BoardyAuth.state();
+    BoardyAuth.mountBadge(document.querySelector('header'));
+    if (!BoardyAuth.isOwner()) document.body.classList.add('guest-mode');
+  })();
+</script>
 
 <section class="smart-dock">
   <h2>💬 <span class="accent">Filtra a parole</span> <span class="hint">— prova "giochi rilassanti per 2 in 30 minuti" oppure "qualcosa simile a Catan"</span></h2>

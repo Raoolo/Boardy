@@ -253,6 +253,32 @@ def _migrate_v6_wishlist(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_games_status ON games(status)")
 
 
+def _migrate_v7_users(conn: sqlite3.Connection) -> None:
+    """v7: add `users` table for auth (owner login, guest = unauthenticated).
+
+    Why a separate table instead of just a hardcoded list in .env:
+    - Hashed passwords belong in the DB, not in a config file checked into git.
+    - `created_at` lets us audit who joined when.
+    - `role` lets us add 'admin' / read-only roles later without another migration.
+
+    Why no per-user columns on `games` / `conversations`:
+    - Collezione condivisa: tutti gli owner vedono e modificano lo stesso
+      inventario (decisione 2026-05-14). Stessa cosa per le chat.
+    - Solo l'audit log (`changes.source`) traccia CHI ha fatto cosa
+      tramite `_source = "chat:{conv_id}/user:{username}"`.
+    """
+    if not _table_exists(conn, "users"):
+        conn.execute(
+            """CREATE TABLE users (
+                 id INTEGER PRIMARY KEY,
+                 username TEXT NOT NULL UNIQUE,
+                 password_hash TEXT NOT NULL,
+                 role TEXT NOT NULL DEFAULT 'owner',
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+               )"""
+        )
+
+
 def _migrate_v4_description_embedding(conn: sqlite3.Connection) -> None:
     """v4: add description embedding columns to games (idempotent).
 
@@ -300,5 +326,8 @@ def migrate() -> None:
 
         # v6: wishlist columns + status fence.
         _migrate_v6_wishlist(conn)
+
+        # v7: users table for owner login.
+        _migrate_v7_users(conn)
 
         conn.commit()

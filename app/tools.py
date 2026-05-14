@@ -1716,3 +1716,26 @@ TOOL_FUNCS = {
     "list_rulebooks":          list_rulebooks,
     "web_search":              web_search,
 }
+
+
+# Source of truth per il gating guest/owner. Tutti i tool che mutano stato
+# (DB o filesystem) devono essere qui dentro — chat.py li filtra fuori dal
+# registry quando il chiamante e' guest (non autenticato).
+#
+# Non basta affidarsi all'euristica "ha kwarg _source" (usata per il
+# `_source` injection): `ingest_rulebook` scrive su `rulebooks`/`chunks` ma
+# non dichiara `_source`. Mantenere l'insieme esplicito = piu' lavoro al
+# momento di aggiungere un tool, ma zero rischi di buchi silenziosi.
+WRITE_TOOLS: set[str] = {
+    "add_game",
+    "update_game",
+    "delete_game",
+    "set_sleeve_requirements",
+    "update_inventory",
+    "add_to_inventory",
+    "add_to_wishlist",
+    "update_wishlist",
+    "mark_as_owned",
+    "remove_from_wishlist",
+    "ingest_rulebook",
+}

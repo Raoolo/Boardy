@@ -12,6 +12,39 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-05-14 (sera) — Auth (owner login + guest read-only) & gotcha passlib/bcrypt 5
+
+Aggiunti login owner (username/password locale) + modalità guest read-only. Schema v7 = `users` table; cookie firmato (itsdangerous); chat guest in `sessionStorage` lato client (zero GDPR concern); tool gating per ruolo in `app/chat.py`. Dettagli completi nel TODO `Auth + guest mode`. Tre cose vale la pena ricordare oltre quel changelog:
+
+### Gotcha — `passlib[bcrypt]` ≠ funziona con `bcrypt>=5.0`
+
+Avevo aggiunto `passlib[bcrypt]>=1.7.4` come dipendenza. uv ha tirato `bcrypt 5.0.0` come transitive. Primo `hash_password()` → crash:
+
+```
+(trapped) error reading bcrypt version
+AttributeError: module 'bcrypt' has no attribute '__about__'
+…
+ValueError: password cannot be longer than 72 bytes
+```
+
+passlib legge `bcrypt.__about__.__version__` per il sniffing; in bcrypt 5 quell'attributo è stato rimosso. Quando passlib non riesce a sniffare, prova un "wrap-bug detection" che usa una password di 73 byte per testare un bug storico di bcrypt — bcrypt 5 rifiuta tutto >72 byte e crasha lo stub.
+
+**Fix**: rimosso passlib, usato `bcrypt` direttamente (API pulita: `bcrypt.hashpw`, `bcrypt.checkpw`). Una dipendenza in meno, niente abstraction layer rotta. Truncate manuale a 72 byte in `app/auth.py:hash_password` per essere espliciti sul limite invece di lasciare crashare con password lunghe (unlikely ma deterministico).
+
+Se in futuro vuoi argon2 (più moderno di bcrypt), usa `argon2-cffi` diretto invece di tornare a passlib.
+
+### Decisione — guest chat = ephemera client-side (no DB write)
+
+Discusso GDPR per chat guest. Salvare chat anonime senza consenso = violazione (art. 6 GDPR — il testo può contenere PII tipo "il mio amico Marco vuole giocare a..."). Tre opzioni: (a) ephemera in `sessionStorage`, (b) full GDPR (banner consenso + `/privacy` + retention + purge script + cookie session per right-to-delete), (c) niente chat per guest.
+
+**Scelto (a)**. Costo compliance = 0, prezzo = nessuna analytics su cosa chiedono i guest. Se in futuro le analytics diventano interessanti, c'è già una TODO con la lista dei pezzi da aggiungere — meglio aggiungere superficie di compliance quando serve davvero, non "tanto un domani".
+
+### Pattern — explicit `WRITE_TOOLS` set invece di euristica `_source`
+
+Il filtro per ruolo guest/owner non può basarsi solo su "il tool ha `_source` kwarg" (euristica già usata per il source injection). `ingest_rulebook` scrive su `rulebooks`/`chunks` ma non dichiara `_source` — passerebbe il filtro come "read". Soluzione: `tools.WRITE_TOOLS = {...}` esplicito, source of truth per il gating. `_source` rimane l'euristica per l'audit injection (cosa diversa). Lezione generalizzabile: quando un meccanismo è una **policy** (chi può fare cosa), tienilo dichiarativo (set/lista) e centralizzato; quando è una **convenzione di firma** (cosa il chiamante può/deve passare), un'euristica su `inspect.signature` va bene.
+
+---
+
 ## 2026-05-14 (PM) — Wishlist polish: skip-confirmation, ready-to-sleeve, BGG media hook
 
 Sessione di rifinitura post-feature wishlist. Quattro pattern che emergono come riusabili oltre il caso specifico.
