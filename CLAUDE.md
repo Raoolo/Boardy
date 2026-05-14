@@ -60,6 +60,7 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - `secondbrain/memo-boardy-future.md` — long-form rationale behind TODO items. Open when a TODO needs context.
 - `secondbrain/memo-deploy-howto.md` — exact Docker/git commands for self-host (setup, update workflow, troubleshooting table).
 - `secondbrain/memo-deploy-caveman.md` — mental model of the deploy (restaurant analogy + real-life examples). Read first when re-orienting after a break.
+- `secondbrain/memo-auth-caveman.md` — auth in caveman mode (portiere/braccialetto). Use when explaining the login model to a friend or auditing what can/cannot leak.
 - `secondbrain/` (broader) — the user's Obsidian vault. Notes about Boardy live here; cross-references to other personal projects may exist. Don't write to it without being asked.
 
 ## Conventions
