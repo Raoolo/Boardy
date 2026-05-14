@@ -1,6 +1,6 @@
 """Excel -> SQLite ETL for Boardy.
 
-Reads sheet 'Elenco Premium' from `1) ElencoGiochi.xlsx`, parses the messy
+Reads sheet 'Elenco Premium' from `data/ElencoGiochi.xlsx`, parses the messy
 SLEEVE column with regex, and upserts into the SQLite database at `boardy.db`.
 
 Upsert semantics (since 2026-05-04):
@@ -29,7 +29,7 @@ from pathlib import Path
 import openpyxl
 
 ROOT = Path(__file__).resolve().parent.parent
-EXCEL_PATH = ROOT / "1) ElencoGiochi.xlsx"
+EXCEL_PATH = ROOT / "data" / "ElencoGiochi.xlsx"
 DB_PATH = ROOT / "boardy.db"
 UNPARSED_PATH = ROOT / "etl" / "unparsed.txt"
 SHEET_NAME = "Elenco Premium"

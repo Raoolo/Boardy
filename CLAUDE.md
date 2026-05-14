@@ -20,6 +20,19 @@ uv run python etl/embed_descriptions.py [--force]
 
 No test suite — validate by smoke-testing a tool (`uv run python -c "from app.tools import sleeve_summary; print(sleeve_summary())"`) or hitting `POST /chat`. Server has no auto-reload; restart manually after Python changes. `web/` is served live.
 
+## Directory layout
+
+```
+app/         FastAPI app + chat loop + tools (read code first)
+etl/         One-shot scripts: Excel import, BGG backfill, embeddings
+web/         Static HTML pages (index/library/sleeves/wishlist), no build step
+rulebooks/   PDF rulebooks (gitignored — copyright + bulky)
+data/        Source data + DB backups (Excel + *.db.bak; runtime DB stays at repo root)
+archive/     Legacy code from abandoned approaches (e.g. Ollama exploration). Read-only history.
+secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO NOT write without being asked.
+.claude/     Claude Code's own state (auto-managed)
+```
+
 ## Where to look
 
 - `app/chat.py` — provider-agnostic tool-use loop, up to 8 rounds. Auto-injects `_source="chat:{conv_id}"` into write tools via `inspect.signature`.
