@@ -2,6 +2,8 @@
 
 Reference rapido per quando ho dimenticato la sequenza. Documentazione *esecutiva*, non concettuale — per il "perché" leggi `LEARNINGS.md`.
 
+> 💡 **Se sei confuso sul mental model** (cosa è un container, dove vive il DB, cosa rompe cosa) leggi prima `memo-deploy-caveman.md` — analogie e esempi di vita reale. Poi torna qui per i comandi esatti.
+
 ---
 
 ## Mental model in 4 righe
