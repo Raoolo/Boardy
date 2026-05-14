@@ -24,7 +24,7 @@ Single-user, runs on `localhost`, no cloud DB, no build step.
 |--------------|------------------------------------------------------------------------|
 | Backend      | Python 3.13, FastAPI, uvicorn                                          |
 | Database     | SQLite (star schema, no ORM)                                           |
-| LLM          | Anthropic Claude Sonnet 4.6 (chat) + Haiku 4.5 (BGG backfill)          |
+| LLM          | DeepSeek-chat (production default, ~10× cheaper than Sonnet) — Anthropic Sonnet 4.6 + Haiku 4.5 swappable via `LLM_PROVIDER` |
 | Embeddings   | `intfloat/multilingual-e5-base` via `sentence-transformers` (local)    |
 | RAG          | `pypdf` + brute-force NumPy cosine over float32 BLOBs                  |
 | Frontend     | Vanilla HTML/JS + `marked.js` from CDN (no build, no framework)        |
@@ -48,8 +48,9 @@ Single-user, runs on `localhost`, no cloud DB, no build step.
                        │
                        ▼
               ┌─────────────────┐
-              │  Claude Sonnet  │── tool-use loop, up to 8 rounds
-              │   + web_search  │   trusted-domain allowlist
+              │  LLM provider   │── tool-use loop, up to 8 rounds
+              │ (DeepSeek deflt;│   web_search via Tavily client-side tool
+              │  Anthropic alt) │   (trusted-domain allowlist)
               └────────┬────────┘
                        │
                        ▼

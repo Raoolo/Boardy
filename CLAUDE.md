@@ -35,20 +35,28 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 
 ## Where to look
 
+- `app/main.py` — FastAPI entry point. All REST endpoints (`/chat`, `/conversations/*`, `/sleeves/*`, `/library/*`, `/wishlist/*`, `/games/*`) + StaticFiles mount. First file to read when adding a new route.
 - `app/chat.py` — provider-agnostic tool-use loop, up to 8 rounds. Auto-injects `_source="chat:{conv_id}"` into write tools via `inspect.signature`.
 - `app/tools.py` — all tools. Adding one = function + JSON schema in `TOOLS` + entry in `TOOL_FUNCS`. Write tools must declare `_source: str | None = None`.
-- `app/llm.py` — `Provider` ABC. `AnthropicProvider` (default, `claude-sonnet-4-6` + server-side `web_search_20250305`) and `OllamaProvider`. Selection per-request via `LLM_PROVIDER`.
-- `app/schema.py` — star schema DDL + idempotent v1→v2 migration on every boot.
+- `app/llm.py` — `Provider` ABC with three impls: `AnthropicProvider` (`claude-sonnet-4-6`), `DeepSeekProvider` (`deepseek-chat`, OpenAI-compatible — **current production default per `.env`**, ~10× cheaper than Sonnet), `OllamaProvider` (local, archived — see memory). Selection per-request via `LLM_PROVIDER`. Web search is client-side (Tavily tool in `app/tools.py`) — no provider-specific search anymore. `/library/filter` is hardcoded to `deepseek-chat` (override via `LIBRARY_FILTER_MODEL`).
+- `app/schema.py` — star schema DDL + idempotent v1→v6 migration on every boot (latest: wishlist `status` col).
 - `app/audit.py` — every write to `games`/`sleeve_requirements`/`sleeve_inventory` logs to `changes`.
+- `app/conversations.py` — server-side conversation persistence + `_title_from_history` (currently truncates first user msg; see TODO).
+- `app/db.py` — SQLite connection. Reads env `BOARDY_DB` (Docker volume path); falls back to `<repo>/boardy.db`.
 - `app/games_semantic.py` — hybrid SQL+cosine over `games.description_embedding`. Reuses `_model_lazy()` from `rulebooks.py` (single 280MB load).
 - `app/rulebooks.py` — pypdf chunking + e5 embeddings + brute-force cosine.
-- `web/index.html` — single-file UI, vanilla JS + `marked.js`. No build step.
+- `web/index.html` — chat UI (single-file vanilla JS + `marked.js`). No build step.
+- `web/library.html` — library page: grid/table toggle, multi-select category/mechanic filters, smart-filter chatbot (`/library/filter`).
+- `web/sleeves.html` — sleeve dashboard: KPI cards, Da comprare, Buste future (wishlist preview), Pronti da sleevare, mini-chat dock.
+- `web/wishlist.html` — wishlist page: grid+table, priority chips, Promise-based confirm modal for buy/remove, chat dock.
 
 ## Companion docs (read before non-trivial work)
 
 - `LEARNINGS.md` — **read first**. Tribal knowledge: gotchas, decisions, user preferences accumulated across sessions.
 - `TODO.md` — actionable backlog with priorities. Consult when the user asks "what's next?".
 - `secondbrain/memo-boardy-future.md` — long-form rationale behind TODO items. Open when a TODO needs context.
+- `secondbrain/memo-deploy-howto.md` — exact Docker/git commands for self-host (setup, update workflow, troubleshooting table).
+- `secondbrain/memo-deploy-caveman.md` — mental model of the deploy (restaurant analogy + real-life examples). Read first when re-orienting after a break.
 - `secondbrain/` (broader) — the user's Obsidian vault. Notes about Boardy live here; cross-references to other personal projects may exist. Don't write to it without being asked.
 
 ## Conventions
@@ -61,12 +69,16 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - **`_source` is internal.** Never put it in a tool's JSON schema — chat.py injects it. Otherwise the model can spoof audit origins.
 - **Windows console = cp1252.** Scripts printing `→`/`✓`/`↗` must `sys.stdout.reconfigure(encoding="utf-8")` early or run with `PYTHONIOENCODING=utf-8`.
 - **E5 multilingual thresholds**: ≥0.78 strong, 0.72–0.77 borderline, <0.72 noise. Lower than English-only — IT/EN trade-off.
+- **Wishlist fence on read tools.** `games.status` is `'owned' | 'wishlist'` in a single table. Read tools (`list_games`, `sleeve_summary`, `search_games_semantic`, `library_data`, `games_names`) MUST default to `status='owned'`. Opt-in via `status='wishlist'`/`'any'` where it makes sense. Forgetting this leaks wishlist into collection counts.
+- **BGG media backfill hook fires post-write.** `_backfill_bgg_media(gid)` is called from `add_game`, `update_game`, `add_to_wishlist`, `update_wishlist` to patch `thumbnail_url`/`image_url` via `etl/bgg_api.fetch_thing()` when `bgg_id` is set but URLs are empty. If you add a write tool that mutates `bgg_id`, call the hook too.
 
 ## Environment
 
 - `ANTHROPIC_API_KEY` — Anthropic Console key (separate from claude.ai Pro; Pro does NOT include API).
-- `LLM_PROVIDER` — `anthropic` (default) or `ollama`. Per-request, no restart.
-- `LLM_MODEL`, `OLLAMA_BASE_URL` — optional overrides.
+- `LLM_PROVIDER` — `anthropic` | `deepseek` | `ollama`. Code default is `anthropic`, but deployed `.env` sets `deepseek` (the actual production provider). Per-request, no restart.
+- `DEEPSEEK_API_KEY` — required when `LLM_PROVIDER=deepseek` AND for `/library/filter` (which is always DeepSeek regardless of provider).
+- `LLM_MODEL`, `DEEPSEEK_BASE_URL`, `OLLAMA_BASE_URL` — optional overrides.
+- `LIBRARY_FILTER_MODEL` — override the DeepSeek model used by `/library/filter` (default `deepseek-chat`).
 - `BGG_API_TOKEN` — required since 2026-04 (BGG XML API is Cloudflare-gated, both v1 and v2). Public-page scraping via web_search was tried and failed (JS-rendered widgets — see LEARNINGS).
 - `BOARDY_DB` — optional, overrides DB path. Used by `docker-compose.yml` to point at `/data/boardy.db` (named volume). Defaults to `<repo>/boardy.db`.
 - `CF_TUNNEL_TOKEN` — Cloudflare Tunnel token. Required ONLY for `docker compose --profile tunnel` (self-host deploy). Generated by the tunnel owner in the CF dashboard (Zero Trust → Networks → Tunnels → Create → token).

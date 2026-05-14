@@ -3,6 +3,13 @@
 A running notepad for Claude (and humans) working on this project across sessions.
 Append, don't rewrite. Newest entries on top.
 
+> 🔖 **Current state breadcrumb** (read `.env` and `CLAUDE.md` for ground truth):
+> Production LLM provider is **DeepSeek-chat** (`LLM_PROVIDER=deepseek` in `.env`).
+> Older entries below may say "Sonnet is the default" or "we went back to Anthropic" —
+> those were true at their date; the provider flipped back to DeepSeek later
+> (cost: ~10× cheaper, tool-use quality acceptable for Boardy's needs).
+> `/library/filter` is always DeepSeek regardless of `LLM_PROVIDER`.
+
 ---
 
 ## 2026-05-14 (PM) — Wishlist polish: skip-confirmation, ready-to-sleeve, BGG media hook
