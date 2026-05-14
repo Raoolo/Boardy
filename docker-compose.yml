@@ -1,0 +1,76 @@
+# Boardy — local & self-host stack.
+#
+# Two services with distinct activation modes:
+#
+#   docker compose up -d                       → only boardy, on localhost:8765
+#                                                (dev / single-machine LAN)
+#
+#   docker compose --profile tunnel up -d      → boardy + cloudflared
+#                                                (server-side deploy via CF
+#                                                Tunnel; requires CF_TUNNEL_TOKEN
+#                                                in .env)
+#
+# Bind-mounting code (app/, etl/, web/) is intentional: the typical update
+# loop on the server is `git pull && docker compose restart boardy`, which
+# takes a few seconds vs. a full image rebuild. Image rebuilds are needed
+# ONLY when pyproject.toml / uv.lock change (i.e. dependency churn).
+#
+# State persistence:
+#   - boardy.db is in a named volume (`boardy_db`). Survives container/image
+#     rebuilds. Backup = `docker compose exec boardy sh -c 'cat /data/boardy.db' > backup.db`.
+#   - rulebooks/ is bind-mounted from host (PDFs are bulky, easier to manage
+#     on the host filesystem than inside a volume).
+#   - HF cache is baked in the image (see Dockerfile) — no volume needed.
+
+services:
+  boardy:
+    build: .
+    container_name: boardy
+    restart: unless-stopped
+    env_file: .env
+    # Override BOARDY_DB so the app writes to the volume path, not the
+    # repo-relative default. The app.db module reads this if set, otherwise
+    # falls back to ./boardy.db (legacy behavior preserved for local dev).
+    environment:
+      BOARDY_DB: /data/boardy.db
+    volumes:
+      # Code: bind-mount for hot-update via `git pull && restart boardy`.
+      # Read-only so a container-side bug can't corrupt the host repo.
+      - ./app:/app/app:ro
+      - ./etl:/app/etl:ro
+      - ./web:/app/web:ro
+      # State: persistent across rebuilds.
+      - boardy_db:/data
+      - ./rulebooks:/app/rulebooks
+    # Local-only port binding. With the tunnel profile, traffic comes via
+    # the cloudflared container over the internal network — 8765 stays
+    # unreachable from the public internet.
+    ports:
+      - "127.0.0.1:8765:8765"
+    networks:
+      - boardy_net
+
+  # CF Tunnel — exposes boardy:8765 over a Cloudflare Tunnel to the named
+  # hostname configured in the CF dashboard. The token in CF_TUNNEL_TOKEN
+  # carries the tunnel ID + credentials; no separate config file needed
+  # since the dashboard owns the ingress rules (Tunnels → Public Hostname
+  # → service: http://boardy:8765).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: boardy-cloudflared
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CF_TUNNEL_TOKEN}
+    depends_on:
+      - boardy
+    networks:
+      - boardy_net
+
+volumes:
+  boardy_db:
+
+networks:
+  boardy_net:
+    driver: bridge

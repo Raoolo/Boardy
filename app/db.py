@@ -1,10 +1,15 @@
 """SQLite connection helper. One read/write connection per request."""
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "boardy.db"
+# Default: repo-root/boardy.db (legacy local-dev location).
+# Override via BOARDY_DB env var to point at a persistent volume in Docker
+# (`/data/boardy.db`) — set in docker-compose.yml.
+_DEFAULT_DB = Path(__file__).resolve().parent.parent / "boardy.db"
+DB_PATH = Path(os.environ.get("BOARDY_DB") or _DEFAULT_DB)
 
 
 def get_conn() -> sqlite3.Connection:

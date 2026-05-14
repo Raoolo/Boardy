@@ -1,0 +1,50 @@
+# Keep the build context small and the image clean.
+# Anything copied implicitly (pyproject.toml, uv.lock) is whitelisted by NOT
+# being listed here.
+
+# Version control + dev tooling
+.git
+.gitignore
+.venv
+.vscode
+.idea
+*.code-workspace
+
+# Python artifacts
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Local data — these go into volumes/mounts, NOT the image
+*.db
+*.sqlite
+*.sqlite3
+*.bak
+boardy.db
+
+# Secrets — never bake these into a layer
+.env
+.env.*
+
+# Bulky binaries / generated artifacts
+rulebooks/*.pdf
+rulebooks/*.PDF
+etl/.bgg_cache/
+etl/unparsed.txt
+_imports/
+
+# Personal knowledge base — not part of the app
+secondbrain/
+
+# Docs (already on GitHub, no need in the image)
+*.md
+!CLAUDE.md
+
+# OS-level junk
+.DS_Store
+Thumbs.db
+desktop.ini
