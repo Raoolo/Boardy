@@ -5,6 +5,153 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-05-14 (PM) — Wishlist polish: skip-confirmation, ready-to-sleeve, BGG media hook
+
+Sessione di rifinitura post-feature wishlist. Quattro pattern che emergono come riusabili oltre il caso specifico.
+
+### Pattern — skip-confirmation policy diversa per livello di stake
+La convenzione storica di Boardy è "propose table → wait sì/confermo" prima di
+ogni write. Vale per `add_game`, `update_game`, `delete_game` perché ogni
+riga partecipa a counts, sleeve math, audit visibility. **Per i wishlist
+write il ritual è eccesso**: rollback costa 1 click su "✗ Rimuovi", l'item
+non entra nei totali e l'utente ha già detto "aggiungi X". Tradurre questo
+in tool description + system prompt salva ~300 token a turno e elimina il
+loop "Confermi? sì → confermato → loading…".
+
+**Regola**: la confermazione non è una virtù in sé, è copertura dal costo
+del rollback. Quando il rollback è UI-locale e immediato, l'utente non vuole
+essere fermato. Catalogare i write tool per stake-level (high/low) è una
+distinzione che vale la pena fare esplicita nel prompt.
+
+### Pattern — "ready" surface = what you can do NOW with what you have
+Le tre tabelle storiche di `/sleeves` (Da comprare / Inventario / Aggiungi)
+descrivono stati e gap. Manca la sezione **actionable**: "ho già tutto per
+sleevare questi giochi". Aggiunta come prima sezione (sopra "Da comprare")
+perché è la cosa più immediatamente utile da vedere appena apri la pagina.
+
+Implementazione: per-game independent check vs greedy-deductive. Indipendente
+è facile da spiegare ma sovrastima la capacità se due giochi competono per
+lo stesso stock. Greedy alphabetical pass come secondo passaggio cattura il
+caso e emette un `contention_note` esplicito. Mostrare il caso ottimistico
+(per-game) È utile — mostra cosa potresti fare in linea di principio —
+ma annotare la realtà sequenziale evita lo "stato di sorpresa a metà".
+
+**Generalizzabile**: ogni dashboard che mostra "available capacity" su
+risorsa condivisa ha questo dual-view. Fai sempre entrambi: ottimistico +
+sequenziale, e annota la differenza.
+
+### Pattern — bouncy animation è site-specific, non page-specific
+Sulla `/sleeves` la `:focus-within { max-width: ...}` con `cubic-bezier
+(0.34, 1.56, 0.64, 1)` è stata adorata. Sulla `/wishlist` lo stesso pattern
+è stato bocciato perché "non sta bene". Differenza: su `/sleeves` la chat-
+dock è full-bleed (background bordo-a-bordo, contenuto centrato), su
+`/wishlist` è nested dentro una card con margini e border-radius. Espandere
+la max-width di una card-nested combatte il rhythm dei KPI/filters circostanti;
+espandere una full-bleed bar lo amplifica.
+
+**Lezione**: prima di copiare un'animazione tra pagine, chiedersi *quale
+livello di nesting* ha l'elemento. Animazioni "espansive" funzionano su
+elementi alla cornice esterna, non su elementi nested. Stile statico +
+glow accent sulla textarea bastano quando l'elemento è già visivamente
+"contained".
+
+### Pattern — post-write deterministic backfill per i campi che il modello manca
+Il chat-driven enrichment via `web_search` estrae bene dalla prosa
+(designer, weight, rating) ma manca regolarmente gli URL delle immagini
+(sono `<img>` HTML, non testo). Soluzione: hook post-write
+(`_backfill_bgg_media`) che, se `bgg_id` è valido e `thumbnail_url`/
+`image_url` sono vuoti, fetch via `etl/bgg_api.fetch_thing()` (XML API
+deterministica). Best-effort: try/except, mai blocca la write.
+
+**Regola generale**: per ogni campo che è "deterministico-da-fetchare" ma
+che il modello sbaglia/manca regolarmente, mettere un hook post-write che
+backfilla via API ufficiale. Non insistere sul modello — è ottimo per
+descrizioni e sintesi, scarso per URL exact-match. Dividere i campi in
+"prose fields" (modello fa bene) e "structured fields" (API fa bene), e
+backfillare i secondi automaticamente.
+
+Cache su disco di `bgg_api` (CACHE_DIR + 0.6s rate-limit) rende l'hook
+ripetibile a costo zero dopo la prima fetch — anche per add multipli dello
+stesso gioco in test.
+
+### Side-finding — `ALTER TABLE ... ADD COLUMN NOT NULL DEFAULT 'x'` su SQLite OK con literal
+Già confermato nell'entry mattutina del 14, lo ribadisco perché ho continuato
+ad aggiungere colonne (priority, notes_wishlist, target_price): finché il
+default è un literal (stringa, numero, NULL) funziona. Espressioni dinamiche
+come `CURRENT_TIMESTAMP` su ALTER falliscono — meglio NULL-able + UPDATE
+seguente in quei casi.
+
+---
+
+## 2026-05-14 — Wishlist: status column su `games` invece di tabella separata
+
+### Decisione strutturale
+Wishlist nuova feature, due opzioni di schema sul tavolo:
+1. Tabella `wishlist` separata con stessi campi BGG.
+2. Colonna `status` ('owned' | 'wishlist') su `games`.
+
+Scelta **(2)**. Tre vantaggi che pagano l'effort:
+- BGG pipeline + auto-embed in `add_game`/`update_game` riusati identici.
+  Wishlist item arricchito = stesso flusso web_search → propose → confirm.
+- Promote-to-owned è `UPDATE games SET status='owned'` — niente row migration,
+  embedding/bridges/audit storia preservati per definizione.
+- Cross-discovery ("non lo possiedi ma è in wishlist") = stesso
+  `search_games_semantic` con `status='any'`. Single SQL path.
+
+Costo: aggiungere `WHERE status='owned'` a 5 query (list_games, sleeve_summary,
+search_games_semantic, library_data, games_names). Bounded, esplicito.
+
+### Pattern — read-path fence con opt-out anziché opt-in
+Le 5 funzioni di read sopra hanno tutte default `status='owned'`. Il parametro
+opzionale espone 'wishlist' / 'any', mai stringa libera. **Opt-out perché**:
+un nuovo tool della famiglia rischia di mancare il filtro per dimenticanza, e
+il default sbagliato pollutea silenziosamente i totali ("hai 58 giochi" dove
+2 sono in wishlist). Default = scope sicuro, l'esplicito è "espandi".
+
+Generalizzabile: ogni volta che si introduce uno stato che divide il dataset,
+default al sottoinsieme "principale" e fai opt-in per il resto. Non viceversa.
+
+### Pattern — `mark_as_owned` come single-column flip
+Un UPDATE di una colonna, niente trasferimento riga a riga. Le tentazioni
+"creiamo `wishlist_items` e quando compri sposti": NO. Schema unificato +
+status flag = stato pulito, audit gratis ("status field: wishlist → owned"
+riga del log di `changes`), zero risk di perdere campi nel transfer. **Da
+ricordare**: ogni volta che pensi di "spostare un record tra tabelle", chiedi
+"posso aggiungere una colonna che lo classifica?". 9 su 10 sì.
+
+### Gotcha — `ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT` su SQLite funziona
+Funziona perché il default è un literal (`'owned'`), non un'espressione.
+SQLite rifiuta default non-costanti su ALTER. Per ora viva, ma sappiamo che
+serve cautela su default dinamici (es. `CURRENT_TIMESTAMP` su ALTER fallisce
+storicamente; meglio aggiungere la colonna NULL-able e popolarla con UPDATE
+in un secondo step).
+
+### Smoke test pattern riusato
+Lo smoke test 18-step (`uv run python -c "..."`) sui tool ha catturato:
+- Validazione enum (`priority='ultra'` → errore esplicito).
+- Duplicate guard (`already exists` su name match case-insensitive).
+- Cross-tool refusal (`update_wishlist` su owned, `remove_from_wishlist` su
+  owned, `mark_as_owned` su già-owned).
+- Fence verification (`list_games default` ritorna 56, non 58; `status='any'`
+  ritorna 58).
+
+Pattern stabile: per ogni gruppo di tool nuovi → script `python -c` end-to-end
+con add/list/update/refusal/cleanup. Più veloce di test unitari per Boardy
+(single-user, niente CI), ma assertable. **Sempre cleanup esplicito alla fine
+con `delete_game` o `remove_from_wishlist` sui TEST_* row**, altrimenti il DB
+accumula crud.
+
+### Decisione UI — quick-add form senza enrichment
+Form nella pagina `/wishlist` accetta solo nome + priorità + prezzo target.
+**No web_search automatico dalla pagina**: l'enrichment BGG è esplicitamente
+delegato alla chat ("aggiungi X alla wishlist" → web_search → confirm).
+Motivo: la pagina è capture rapido, la chat è il rituale di conferma. Mischiare
+i due flussi obbliga a duplicare la logica di "propose then confirm" in JS,
+che è dove abbiamo già storicamente avuto bug. Microcopy `add-hint`
+nell'add-dock punta l'utente alla chat per il flow completo.
+
+---
+
 ## 2026-05-06 — UI polish pass: gotchas e preferenze del proprietario
 
 Sessione di refactor estetico su tutte e tre le pagine (`/`, `/library`,

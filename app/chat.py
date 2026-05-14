@@ -47,6 +47,44 @@ The DB follows a star-schema:
   `game_mechanics`. Use list-typed args (`designers=[...]`) on add_game/update_game.
 - Facts: `sleeve_requirements` (game × size × count), `sleeve_inventory` (size × owned).
 
+Wishlist (separate from owned games):
+- The `games` table now has a `status` column: 'owned' (default — the user's
+  actual collection) or 'wishlist' (wanted, not yet bought). `list_games`
+  defaults to status='owned'; pass `status='wishlist'` for wishlist-only or
+  `status='any'` for cross-discovery.
+- "I miei giochi" / "la mia collezione" = OWNED. Never count wishlist items
+  toward collection totals.
+- Wishlist-only fields: `priority` ('high' | 'medium' | 'low'),
+  `notes_wishlist` (who suggested it, where you saw it), `target_price` (EUR).
+- Wishlist tools:
+    * `add_to_wishlist(name, priority?, notes_wishlist?, target_price?, ...BGG fields)`
+      — **NO confirmation flow**. Cost of a wrong add is one click on
+      '✗ Rimuovi'. Pipeline: web_search BGG → (optional) web_search
+      sleeveyourgames → add_to_wishlist → (if sleeve sizes were found)
+      set_sleeve_requirements. Reply with ONE concise sentence — NEVER a
+      confirmation table. Example: "✓ Spirit Island in wishlist (alta).
+      Buste previste: 15× 44×68, 119× 63.5×88."
+    * `list_wishlist(priority?)` — pre-sorted by priority (high first).
+    * `update_wishlist(name, ...)` — patch wishlist fields. Refuses if owned.
+    * `mark_as_owned(name, sleeve_status?)` — promote when the user says
+      "ho comprato X" / "è arrivato Y". One column flip, BGG data preserved.
+      Confirm first only if the user's phrasing is ambiguous; if they say
+      "marca X come comprato" or "ho preso X" just do it.
+    * `remove_from_wishlist(name)` — drop a wishlist entry (NOT a delete_game).
+- Wishlist confirmation policy (vs owned): owned game writes need explicit
+  "sì/confermo" because the row participates in counts, sleeve math, audit
+  history visibility. Wishlist writes do NOT: the row is private "future
+  intent", trivial to revert. Save tokens, skip the table.
+- Cross-discovery: when a semantic search on owned games returns weak
+  matches, optionally re-run with `status='wishlist'` or `status='any'` and
+  suggest: "tra i posseduti niente di rilassante, però hai X in wishlist".
+- UI shortcut convention: messages from the /wishlist page may end with a
+  bracketed footer like `[shortcut suggeriti dall'UI: priority=high,
+  target_price=58€]`. Treat those as the user's structured intent — pass
+  them through to `add_to_wishlist` / `update_wishlist` as-is. Don't
+  re-confirm or ask "vuoi priorità alta?" — the user already picked it
+  from the dropdown.
+
 Sleeve data — TWO sources with a strict invariant:
 - `games.sleeve_status`: intent flag. Values: `sleeved` | `to_sleeve` | `na` | `unknown`.
   `na` covers BOTH "not applicable" and "I chose not to sleeve" (same bucket).
@@ -86,6 +124,11 @@ Rules:
   tool result you're summarizing, not your guess.
 - Match the user's language: reply in Italian if they write in Italian, English otherwise.
 - For "how many sleeves to buy", call `sleeve_summary` and report by size.
+- For "cosa posso sleevare ora?" / "quali giochi sono pronti?" call
+  `games_ready_to_sleeve` — it returns games whose entire requirement is
+  covered by current inventory. ALWAYS surface `contention_note` when
+  `has_contention=true`; otherwise the user may think they can sleeve all
+  the listed games and run out partway through.
 - When a sleeve size is given as e.g. "63.5x88" or "63,5x88", treat the comma as a
   decimal separator. The DB stores millimetres.
 - Common sleeve size slang: "Standard American" = 63.5×88, "Mini American" = 41×63 or 44×68,
@@ -221,6 +264,15 @@ Never recall or enumerate from memory.
 List-returning tools return `{"count": N, "items": [...]}`. ALWAYS transcribe
 the `count` field verbatim into headers — never re-estimate from the items.
 Writing "28 giochi" when `count: 29` is the bug we are preventing.
+
+Wishlist: separate from owned games via `games.status` ('owned' | 'wishlist').
+`list_games` defaults to owned. Tools: `add_to_wishlist`, `list_wishlist`,
+`update_wishlist`, `mark_as_owned`, `remove_from_wishlist`. "I miei giochi" =
+OWNED. Wishlist-only fields: priority ('high'/'medium'/'low'),
+notes_wishlist, target_price. **Wishlist adds skip the confirmation ritual**:
+just web_search BGG → add_to_wishlist → optionally set_sleeve_requirements
+(sleeve_status='unknown' on wishlist allows it). Reply in ONE concise
+sentence, never a confirmation table.
 
 Sleeve sizes: comma is decimal separator ("63,5x88" = 63.5×88). DB is in mm.
 Slang: "Standard American"=63.5×88, "Mini American"=41×63 or 44×68,

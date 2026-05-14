@@ -220,6 +220,39 @@ def _migrate_v3_drop_sleeve_raw(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE games SET sleeve_status='na' WHERE sleeve_status='no'")
 
 
+def _migrate_v6_wishlist(conn: sqlite3.Connection) -> None:
+    """v6: extend `games` with a `status` column + wishlist-only fields.
+
+    Why one table instead of a separate `wishlist`: BGG enrichment, the
+    description embedding, audit logging, and dimension bridges already work
+    on `games`. Promoting a wishlist item to owned becomes a one-column
+    UPDATE — no row migration, BGG data preserved. The cost is adding
+    `WHERE status='owned'` to a handful of read queries (library_data,
+    list_games, sleeve_summary, search_games_semantic), bounded and explicit.
+
+    Columns:
+    - `status`: 'owned' | 'wishlist'. NOT NULL default 'owned' — every
+      pre-existing row is, by definition, a game the user owns.
+    - `priority`: 'high' | 'medium' | 'low' | NULL. Only meaningful for
+      wishlist rows; NULL on owned (and preserved if a wishlist row is
+      promoted, so we keep the historical context).
+    - `notes_wishlist`: free-text. Separate from `notes` so the existing
+      ETL-driven `notes` (BGG backfill prose, etc.) stays untouched.
+    - `target_price`: optional EUR target. NULL means no target set.
+    """
+    if not _has_column(conn, "games", "status"):
+        # ALTER TABLE ADD COLUMN with NOT NULL + literal DEFAULT works in SQLite.
+        conn.execute("ALTER TABLE games ADD COLUMN status TEXT NOT NULL DEFAULT 'owned'")
+    if not _has_column(conn, "games", "priority"):
+        conn.execute("ALTER TABLE games ADD COLUMN priority TEXT")
+    if not _has_column(conn, "games", "notes_wishlist"):
+        conn.execute("ALTER TABLE games ADD COLUMN notes_wishlist TEXT")
+    if not _has_column(conn, "games", "target_price"):
+        conn.execute("ALTER TABLE games ADD COLUMN target_price REAL")
+    # Cheap index — used by every read query that filters by status.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_games_status ON games(status)")
+
+
 def _migrate_v4_description_embedding(conn: sqlite3.Connection) -> None:
     """v4: add description embedding columns to games (idempotent).
 
@@ -264,5 +297,8 @@ def migrate() -> None:
 
         # v4: semantic-search columns on games.
         _migrate_v4_description_embedding(conn)
+
+        # v6: wishlist columns + status fence.
+        _migrate_v6_wishlist(conn)
 
         conn.commit()

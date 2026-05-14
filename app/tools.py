@@ -65,6 +65,62 @@ def _clear_requirements_if_done(conn, gid: int, name: str,
 
 # ----- helpers -----
 
+def _backfill_bgg_media(game_id: int) -> bool:
+    """If a game has `bgg_id` set but `thumbnail_url`/`image_url` is empty,
+    fetch them via the BGG XML API and patch the row.
+
+    Why this hook exists: when the chat-driven flow uses `web_search` to
+    enrich a new game, the model often captures title/designer/weight from
+    the rendered page text but skips the thumbnail (it's an `<img>` URL
+    buried in HTML, not in the prose the model reads). The BGG XML API
+    returns these deterministically — much more reliable than asking the
+    model to extract them.
+
+    Best-effort: any failure is swallowed. The hook runs AFTER the commit of
+    `add_game` / `update_game` / `add_to_wishlist` / `update_wishlist` so a
+    network/auth error never blocks the actual write.
+    """
+    try:
+        from .db import get_conn
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT bgg_id, thumbnail_url, image_url FROM games WHERE id=?",
+                (game_id,),
+            ).fetchone()
+            if not row or not row["bgg_id"]:
+                return False
+            need_thumb = not row["thumbnail_url"]
+            need_image = not row["image_url"]
+            if not need_thumb and not need_image:
+                return False
+        # Outside the connection: BGG fetch can be slow (rate-limited).
+        # Lazy import to avoid loading the etl module at app boot.
+        from etl import bgg_api
+        parsed = bgg_api.fetch_thing(int(row["bgg_id"]))
+        if not parsed:
+            return False
+        thumb = parsed.get("thumbnail_url") if need_thumb else None
+        image = parsed.get("image_url") if need_image else None
+        if not thumb and not image:
+            return False
+        sets, vals = [], []
+        if thumb:
+            sets.append("thumbnail_url=?"); vals.append(thumb)
+        if image:
+            sets.append("image_url=?"); vals.append(image)
+        vals.append(game_id)
+        with get_conn() as conn:
+            conn.execute(
+                f"UPDATE games SET {', '.join(sets)}, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                vals,
+            )
+            conn.commit()
+        return True
+    except Exception:
+        # Best-effort: telemetry-only, never break the calling write tool.
+        return False
+
+
 def _upsert_dim(conn, dim_table: str, name: str) -> int:
     name = name.strip()
     if not name:
@@ -122,9 +178,15 @@ def list_games(
     publisher_contains: str | None = None,
     category_contains: str | None = None,
     mechanic_contains: str | None = None,
+    status: str | None = None,
     limit: int = 100,
 ) -> dict:
     """Return matching games as `{count, items}`. Filters AND-combined; *_contains are case-insensitive substring.
+
+    `status` defaults to 'owned' so wishlist items don't leak into "what
+    games do I have?" queries. Pass `status='wishlist'` for wishlist-only
+    or `status='any'` to include both. The fence is opt-out so the LLM
+    can't accidentally count a wishlist item as owned.
 
     The `count` envelope is intentional: LLMs are bad at counting list elements
     in attention. Returning the integer pre-computed lets the model transcribe
@@ -134,6 +196,10 @@ def list_games(
     sql = "SELECT DISTINCT g.* FROM games g"
     params: list[Any] = []
     where: list[str] = []
+    effective_status = (status or "owned").lower()
+    if effective_status != "any":
+        where.append("g.status = ?")
+        params.append(effective_status)
 
     def join_dim(bridge: str, dim: str, fk: str, needle: str) -> None:
         sql_join = f" JOIN {bridge} b_{dim} ON b_{dim}.game_id=g.id JOIN {dim} t_{dim} ON t_{dim}.id=b_{dim}.{fk}"
@@ -247,6 +313,9 @@ def add_game(
         except Exception:
             # Embedding is best-effort; never fail an add_game on it.
             pass
+    # Backfill thumbnail/image via BGG XML API if we have a bgg_id but the
+    # chat-driven enrichment didn't capture the image URLs.
+    _backfill_bgg_media(gid)
     return {"ok": True, "id": gid, "name": name}
 
 
@@ -336,6 +405,9 @@ def update_game(
             games_semantic.embed_one(gid)
         except Exception:
             pass
+    # Backfill thumbnail/image via BGG XML API if missing (e.g. bgg_id was
+    # just set but the chat didn't fetch the image fields).
+    _backfill_bgg_media(gid)
     return result
 
 
@@ -404,7 +476,13 @@ def set_sleeve_requirements(name: str, requirements: list[dict],
 
 
 def sleeve_summary() -> dict:
-    """Per sleeve size: needed (sum across games), owned (inventory), to_buy. Returns `{count, items}`."""
+    """Per sleeve size: needed (sum across games), owned (inventory), to_buy. Returns `{count, items}`.
+
+    Only OWNED games contribute to `needed`. Wishlist items might have
+    BGG-derived sleeve sizes but they're hypothetical — counting them as
+    "to buy now" would inflate the dashboard. They get included automatically
+    the moment the user calls `mark_as_owned`.
+    """
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -417,6 +495,7 @@ def sleeve_summary() -> dict:
                      SUM(count) AS needed,
                      GROUP_CONCAT(g.name, ', ') AS games
               FROM sleeve_requirements sr JOIN games g ON g.id=sr.game_id
+              WHERE g.status='owned'
               GROUP BY width_mm, height_mm
             ) s
             LEFT JOIN (
@@ -424,6 +503,139 @@ def sleeve_summary() -> dict:
               FROM sleeve_inventory GROUP BY width_mm, height_mm
             ) i USING (width_mm, height_mm)
             ORDER BY to_buy DESC, needed DESC
+            """
+        ).fetchall()
+    items = [dict(r) for r in rows]
+    return {"count": len(items), "items": items}
+
+
+def games_ready_to_sleeve() -> dict:
+    """Owned games with `sleeve_status='to_sleeve'` whose ENTIRE requirement
+    list is covered by current sleeve_inventory. Returns:
+
+      {
+        "count_ready": N,           # number of games doable right now
+        "ready": [ {id, name, thumbnail_url, reqs, total} ... ],
+        "not_ready": [ {id, name, reqs, missing: [{size, short_by}]} ... ],
+        "has_contention": bool,     # ready games compete for same stock?
+        "contention_note": str | None,
+      }
+
+    Two important nuances:
+    - The check is PER-GAME and INDEPENDENT — each game is tested against
+      the full inventory snapshot. Two games that individually fit but
+      together exceed stock will BOTH appear in `ready`.
+    - `has_contention=True` flags that case: we re-run a greedy alphabetical
+      pass deducting stock as we go, and if it yields fewer games than the
+      independent check, the difference is the contention.
+
+    Used by `/sleeves/data` (dashboard "Pronti da sleevare" section) and as
+    a chat tool for "cosa posso sleevare ora?" questions.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT g.id, g.name, g.thumbnail_url,
+                   sr.width_mm, sr.height_mm, sr.count, sr.note
+            FROM games g
+            JOIN sleeve_requirements sr ON sr.game_id = g.id
+            WHERE g.status='owned' AND g.sleeve_status='to_sleeve'
+            ORDER BY g.name, sr.width_mm, sr.height_mm
+            """
+        ).fetchall()
+        inv_rows = conn.execute(
+            "SELECT width_mm, height_mm, SUM(count_owned) AS owned "
+            "FROM sleeve_inventory GROUP BY width_mm, height_mm"
+        ).fetchall()
+
+    inv = {(r["width_mm"], r["height_mm"]): r["owned"] or 0 for r in inv_rows}
+
+    # Group requirements by game (preserve order from SQL).
+    by_game: dict[int, dict] = {}
+    for r in rows:
+        g = by_game.setdefault(r["id"], {
+            "id": r["id"], "name": r["name"],
+            "thumbnail_url": r["thumbnail_url"],
+            "reqs": [], "total": 0,
+        })
+        g["reqs"].append({
+            "width_mm": r["width_mm"], "height_mm": r["height_mm"],
+            "count": r["count"], "note": r["note"],
+        })
+        g["total"] += r["count"]
+
+    def _size_label(w: float, h: float) -> str:
+        def fmt(x: float) -> str:
+            return str(int(x)) if x == int(x) else f"{x:g}"
+        return f"{fmt(w)}×{fmt(h)}"
+
+    ready: list[dict] = []
+    not_ready: list[dict] = []
+    for g in by_game.values():
+        missing = []
+        for req in g["reqs"]:
+            have = inv.get((req["width_mm"], req["height_mm"]), 0)
+            if have < req["count"]:
+                missing.append({
+                    "size": _size_label(req["width_mm"], req["height_mm"]),
+                    "needed": req["count"], "have": have,
+                    "short_by": req["count"] - have,
+                })
+        item = {**g, "size_labels": [_size_label(r["width_mm"], r["height_mm"]) for r in g["reqs"]]}
+        if missing:
+            not_ready.append({**item, "missing": missing})
+        else:
+            ready.append(item)
+
+    # Contention check — greedy alphabetical pass deducting stock.
+    sim_inv = dict(inv)
+    greedy_ok = 0
+    for g in sorted(ready, key=lambda x: x["name"].lower()):
+        if all(sim_inv.get((r["width_mm"], r["height_mm"]), 0) >= r["count"]
+               for r in g["reqs"]):
+            for r in g["reqs"]:
+                sim_inv[(r["width_mm"], r["height_mm"])] -= r["count"]
+            greedy_ok += 1
+    has_contention = greedy_ok < len(ready)
+    contention_note = None
+    if has_contention:
+        contention_note = (
+            f"⚠️ {len(ready) - greedy_ok} gioco/i in 'pronti' competono per "
+            f"la stessa misura. In sequenza ne sleevi solo {greedy_ok}."
+        )
+
+    return {
+        "count_ready": len(ready),
+        "ready": ready,
+        "not_ready": not_ready,
+        "has_contention": has_contention,
+        "contention_note": contention_note,
+    }
+
+
+def sleeve_summary_wishlist() -> dict:
+    """Per-size sleeve preview for WISHLIST games. Returns `{count, items}`.
+
+    Mirrors `sleeve_summary` but filtered to `games.status='wishlist'`.
+    No `owned` / `to_buy` columns — wishlist demand is hypothetical, you
+    don't "owe" sleeves for a game you don't own yet. Use this to answer
+    "if I bought everything on my wishlist, how many sleeves would I need?"
+    or "are there sleeve sizes I'd need for wishlist that I don't already
+    cover?".
+
+    Each item: `{width_mm, height_mm, needed, games}` where `games` is the
+    GROUP_CONCAT of wishlist game names contributing to that size.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT width_mm, height_mm,
+                   SUM(count) AS needed,
+                   GROUP_CONCAT(g.name, ', ') AS games
+            FROM sleeve_requirements sr JOIN games g ON g.id=sr.game_id
+            WHERE g.status='wishlist'
+            GROUP BY width_mm, height_mm
+            ORDER BY needed DESC
             """
         ).fetchall()
     items = [dict(r) for r in rows]
@@ -704,14 +916,19 @@ def search_games_semantic(
     sleeve_status: str | None = None,
     category_contains: str | None = None,
     mechanic_contains: str | None = None,
+    status: str = "owned",
     k: int = 10,
 ) -> dict:
-    """Semantic search over the user's owned games via description embeddings.
+    """Semantic search over the user's games via description embeddings.
 
     Hybrid: structured SQL filters first (players / complexity / duration /
     sleeve status / category / mechanic), then cosine on the e5-base embedding
     of `games.description`. Games without an embedding are skipped — run
     `etl/embed_descriptions.py` if results look thin.
+
+    `status` defaults to 'owned'; pass 'wishlist' to search wishlist only,
+    or 'any' to include both (e.g. "i don't own this but I have it in the
+    wishlist"). The `excluded` list mirrors the same scope.
 
     Returns `{count, items}` with `score` per item (cosine similarity, 0–1).
     """
@@ -725,15 +942,282 @@ def search_games_semantic(
         sleeve_status=sleeve_status,
         category_contains=category_contains,
         mechanic_contains=mechanic_contains,
+        status=status,
         k=k,
     )
-    excluded = games_semantic.excluded_from_search()
+    excluded = games_semantic.excluded_from_search(status=status)
     return {
         "count": len(items),
         "items": items,
         "excluded_count": len(excluded),
         "excluded": excluded,
     }
+
+
+# ===== Wishlist tools =====
+# Wishlist lives in the same `games` table with `status='wishlist'`. This keeps
+# the BGG enrichment + description embedding + audit log unified — promoting
+# a wishlist item to owned is one column flip, no row migration, BGG data
+# preserved by definition.
+
+_PRIORITY_VALUES = {"high", "medium", "low"}
+
+
+def add_to_wishlist(
+    name: str,
+    priority: str | None = None,
+    notes_wishlist: str | None = None,
+    target_price: float | None = None,
+    # BGG enrichment (same shape as add_game) — enrich now, reuse on promote.
+    bgg_id: int | None = None,
+    year_published: int | None = None,
+    players_min: int | None = None,
+    players_max: int | None = None,
+    players_best: str | None = None,
+    duration_min: int | None = None,
+    duration_min_min: int | None = None,
+    duration_max_min: int | None = None,
+    age_min: int | None = None,
+    complexity_label: str | None = None,
+    complexity_weight: float | None = None,
+    bgg_rating: float | None = None,
+    description: str | None = None,
+    thumbnail_url: str | None = None,
+    image_url: str | None = None,
+    language: str | None = None,
+    designers: list[str] | None = None,
+    publishers: list[str] | None = None,
+    categories: list[str] | None = None,
+    mechanics: list[str] | None = None,
+    _source: str | None = None,
+) -> dict:
+    """Insert a wishlist item. Fails if `name` already exists (owned or wishlist).
+
+    Wishlist-only fields: `priority` (high/medium/low), `notes_wishlist`
+    (free-text — who suggested it, where you saw it), `target_price` (EUR).
+    All BGG enrichment fields are accepted so the same web_search → propose →
+    confirm → add flow works as for owned games. Bridges (designers etc.)
+    upsert into the shared dimension tables.
+    """
+    if priority is not None and priority not in _PRIORITY_VALUES:
+        return {"error": f"priority must be one of {sorted(_PRIORITY_VALUES)}, got {priority!r}"}
+    with get_conn() as conn:
+        if conn.execute("SELECT 1 FROM games WHERE LOWER(name)=LOWER(?)", (name,)).fetchone():
+            return {"error": f"Game {name!r} already exists. "
+                             f"Use `update_wishlist` (or `add_game` / `update_game` for owned)."}
+        cur = conn.execute(
+            """INSERT INTO games(name, bgg_id, year_published, players_min, players_max,
+                                 players_best, duration_min, duration_min_min, duration_max_min,
+                                 age_min, complexity_label, complexity_weight, bgg_rating,
+                                 description, thumbnail_url, image_url, language,
+                                 sleeve_status, status, priority, notes_wishlist, target_price)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (name, bgg_id, year_published, players_min, players_max, players_best,
+             duration_min, duration_min_min, duration_max_min, age_min,
+             complexity_label, complexity_weight, bgg_rating, description,
+             thumbnail_url, image_url, language,
+             "unknown", "wishlist", priority, notes_wishlist, target_price),
+        )
+        gid = cur.lastrowid
+        bridge_added: dict[str, list[str]] = {}
+        for bridge, (dim, fk) in DIM_TABLES.items():
+            arg_name = bridge.replace("game_", "")
+            vals = locals().get(arg_name)
+            _set_bridges(conn, gid, bridge, dim, fk, vals)
+            if vals:
+                bridge_added[arg_name] = vals
+        snapshot = dict(conn.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone())
+        snapshot.update(bridge_added)
+        audit.log_full(conn, table="games", row_id=gid, row_label=name,
+                       action="insert", snapshot=snapshot,
+                       source=f"{_source or 'unknown'} wishlist")
+        conn.commit()
+    # Auto-embed description so the wishlist participates in semantic search
+    # (with status='any' or 'wishlist').
+    if description:
+        try:
+            from . import games_semantic
+            games_semantic.embed_one(gid)
+        except Exception:
+            pass
+    # Backfill thumbnail/image via BGG XML API — wishlist items benefit even
+    # more than owned games because the /wishlist grid relies on the cover
+    # image for visual recall ("which Brass was it again?").
+    _backfill_bgg_media(gid)
+    return {"ok": True, "id": gid, "name": name, "status": "wishlist",
+            "priority": priority}
+
+
+def list_wishlist(priority: str | None = None, limit: int = 100) -> dict:
+    """List wishlist items as `{count, items}`. Optional `priority` filter.
+
+    Each item carries name + BGG enrichment + wishlist-only fields
+    (priority, notes_wishlist, target_price). Items are ordered by
+    priority (high → low → no-priority) then alphabetically by name —
+    so the dashboard surfaces "what to buy first".
+    """
+    if priority is not None and priority not in _PRIORITY_VALUES:
+        return {"error": f"priority must be one of {sorted(_PRIORITY_VALUES)}, got {priority!r}"}
+    # Manual priority sort: high=0, medium=1, low=2, NULL=3. SQLite has no
+    # FIELD()-like function so we use a CASE expression.
+    sql = ("SELECT g.* FROM games g WHERE g.status='wishlist'")
+    params: list[Any] = []
+    if priority:
+        sql += " AND g.priority=?"; params.append(priority)
+    sql += (" ORDER BY CASE g.priority "
+            "WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, "
+            "g.name LIMIT ?")
+    params.append(int(limit))
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+        items = [_row_to_game_dict(r, conn, full=False) for r in rows]
+    return {"count": len(items), "items": items}
+
+
+def update_wishlist(
+    name: str,
+    priority: str | None = None,
+    notes_wishlist: str | None = None,
+    target_price: float | None = None,
+    # Allow BGG enrichment patches too (e.g. after a later web_search).
+    bgg_id: int | None = None,
+    year_published: int | None = None,
+    players_min: int | None = None,
+    players_max: int | None = None,
+    players_best: str | None = None,
+    duration_min: int | None = None,
+    duration_min_min: int | None = None,
+    duration_max_min: int | None = None,
+    age_min: int | None = None,
+    complexity_label: str | None = None,
+    complexity_weight: float | None = None,
+    bgg_rating: float | None = None,
+    description: str | None = None,
+    thumbnail_url: str | None = None,
+    image_url: str | None = None,
+    language: str | None = None,
+    designers: list[str] | None = None,
+    publishers: list[str] | None = None,
+    categories: list[str] | None = None,
+    mechanics: list[str] | None = None,
+    _source: str | None = None,
+) -> dict:
+    """Patch a wishlist row. Refuses if the row is already owned — use
+    `update_game` for owned items so the audit trail stays semantically clear.
+    """
+    if priority is not None and priority not in _PRIORITY_VALUES:
+        return {"error": f"priority must be one of {sorted(_PRIORITY_VALUES)}, got {priority!r}"}
+    scalar_fields = {
+        "priority": priority, "notes_wishlist": notes_wishlist,
+        "target_price": target_price,
+        "bgg_id": bgg_id, "year_published": year_published,
+        "players_min": players_min, "players_max": players_max, "players_best": players_best,
+        "duration_min": duration_min, "duration_min_min": duration_min_min,
+        "duration_max_min": duration_max_min, "age_min": age_min,
+        "complexity_label": complexity_label, "complexity_weight": complexity_weight,
+        "bgg_rating": bgg_rating, "description": description,
+        "thumbnail_url": thumbnail_url, "image_url": image_url, "language": language,
+    }
+    fields = {k: v for k, v in scalar_fields.items() if v is not None}
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, status FROM games WHERE LOWER(name)=LOWER(?)", (name,)
+        ).fetchone()
+        if not row:
+            return {"error": f"Game {name!r} not found in wishlist."}
+        if row["status"] != "wishlist":
+            return {"error": f"{name!r} is owned (status={row['status']!r}); "
+                             f"use `update_game` instead."}
+        gid = row["id"]
+        before = dict(conn.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone())
+        for bridge, (dim, fk) in DIM_TABLES.items():
+            arg_name = bridge.replace("game_", "")
+            before[arg_name] = _game_dims(conn, gid, bridge, dim, fk)
+        if fields:
+            sets = ", ".join(f"{k}=?" for k in fields) + ", updated_at=CURRENT_TIMESTAMP"
+            conn.execute(f"UPDATE games SET {sets} WHERE id=?", [*fields.values(), gid])
+        for bridge, (dim, fk) in DIM_TABLES.items():
+            arg_name = bridge.replace("game_", "")
+            _set_bridges(conn, gid, bridge, dim, fk, locals().get(arg_name))
+        after = dict(conn.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone())
+        for bridge, (dim, fk) in DIM_TABLES.items():
+            arg_name = bridge.replace("game_", "")
+            after[arg_name] = _game_dims(conn, gid, bridge, dim, fk)
+        n_logged = audit.log_diff(conn, table="games", row_id=gid, row_label=name,
+                                  before=before, after=after,
+                                  source=f"{_source or 'unknown'} wishlist")
+        conn.commit()
+    if description is not None:
+        try:
+            from . import games_semantic
+            games_semantic.embed_one(gid)
+        except Exception:
+            pass
+    _backfill_bgg_media(gid)
+    return {"ok": True, "name": name, "updated": list(fields.keys()), "audit_rows": n_logged}
+
+
+def mark_as_owned(name: str, sleeve_status: str = "unknown",
+                  _source: str | None = None) -> dict:
+    """Promote a wishlist row to an owned game.
+
+    Single-column flip: BGG enrichment, description embedding, dimension
+    bridges, even audit history are all preserved. Optional `sleeve_status`
+    seeds the sleeve workflow (default 'unknown' — user will set it later
+    or it'll be classified on next ETL re-import).
+    """
+    if sleeve_status not in ("sleeved", "to_sleeve", "na", "unknown"):
+        return {"error": f"sleeve_status must be sleeved/to_sleeve/na/unknown, got {sleeve_status!r}"}
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, status, sleeve_status FROM games WHERE LOWER(name)=LOWER(?)", (name,)
+        ).fetchone()
+        if not row:
+            return {"error": f"Game {name!r} not found."}
+        if row["status"] == "owned":
+            return {"error": f"{name!r} is already owned."}
+        gid = row["id"]
+        old_sleeve = row["sleeve_status"]
+        conn.execute(
+            "UPDATE games SET status='owned', sleeve_status=?, "
+            "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (sleeve_status, gid),
+        )
+        audit.log_change(conn, table="games", row_id=gid, row_label=name,
+                         action="update", field="status",
+                         old="wishlist", new="owned",
+                         source=f"{_source or 'unknown'} mark_as_owned")
+        if old_sleeve != sleeve_status:
+            audit.log_change(conn, table="games", row_id=gid, row_label=name,
+                             action="update", field="sleeve_status",
+                             old=old_sleeve, new=sleeve_status,
+                             source=f"{_source or 'unknown'} mark_as_owned")
+        conn.commit()
+    return {"ok": True, "name": name, "status": "owned", "sleeve_status": sleeve_status}
+
+
+def remove_from_wishlist(name: str, _source: str | None = None) -> dict:
+    """Delete a wishlist row. Refuses if the row is owned (use `delete_game`)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM games WHERE LOWER(name)=LOWER(?)", (name,)
+        ).fetchone()
+        if not row:
+            return {"error": f"Game {name!r} not found."}
+        if row["status"] != "wishlist":
+            return {"error": f"{name!r} is owned (status={row['status']!r}); "
+                             f"use `delete_game` if you really want to remove it."}
+        gid = row["id"]
+        snapshot = dict(row)
+        for bridge, (dim, fk) in DIM_TABLES.items():
+            arg_name = bridge.replace("game_", "")
+            snapshot[arg_name] = _game_dims(conn, gid, bridge, dim, fk)
+        audit.log_full(conn, table="games", row_id=gid, row_label=name,
+                       action="delete", snapshot=snapshot,
+                       source=f"{_source or 'unknown'} wishlist")
+        conn.execute("DELETE FROM games WHERE id=?", (gid,))
+        conn.commit()
+    return {"ok": True, "deleted": name}
 
 
 def list_dimension(table: str) -> dict:
@@ -789,7 +1273,10 @@ TOOLS = [
         "description": ("List games with optional filters (substring, AND-combined). "
                         "Up to 100 results. Returns `{count, items}` — ALWAYS use the "
                         "`count` field for any number you write (headers, summaries). "
-                        "Never re-estimate by looking at items."),
+                        "Never re-estimate by looking at items. "
+                        "DEFAULTS TO OWNED GAMES ONLY. Pass `status='wishlist'` for the "
+                        "wishlist, or `status='any'` to include both. The user's "
+                        "collection (\"i miei giochi\") = owned, NOT wishlist."),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -801,6 +1288,8 @@ TOOLS = [
                 "publisher_contains":  {"type": "string"},
                 "category_contains":   {"type": "string"},
                 "mechanic_contains":   {"type": "string"},
+                "status":              {"type": "string", "enum": ["owned", "wishlist", "any"],
+                                         "description": "Defaults to 'owned'. 'wishlist' = wanted, not yet bought."},
             },
         },
     },
@@ -867,7 +1356,32 @@ TOOLS = [
     },
     {
         "name": "sleeve_summary",
-        "description": "Aggregate by size: needed across collection, owned in inventory, to_buy. Use for sleeve math.",
+        "description": "Aggregate by size: needed across collection, owned in inventory, to_buy. Use for sleeve math. OWNED games only — wishlist items don't count toward 'to buy now'.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "games_ready_to_sleeve",
+        "description": (
+            "Owned games with sleeve_status='to_sleeve' whose ENTIRE "
+            "requirements are covered by current inventory. Returns "
+            "{count_ready, ready, not_ready, has_contention, contention_note}. "
+            "Use for 'cosa posso sleevare ora?' / 'quali giochi sono pronti da "
+            "imbustare?'. Each `ready` item has the reqs broken down by size; "
+            "each `not_ready` item carries a `missing` list with size + short_by. "
+            "If `has_contention=True`, surface the `contention_note` to the user "
+            "— it means two or more ready games would compete for the same "
+            "stock and you can't actually sleeve them all in sequence."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "sleeve_summary_wishlist",
+        "description": (
+            "Per-size sleeve preview for WISHLIST games only — hypothetical "
+            "demand for things you don't own yet. Use for 'se compro tutto in "
+            "wishlist quante buste mi servono?' or 'quali misure mi mancherebbero "
+            "per la wishlist?'. No to_buy/owned columns — those are owned-only math."
+        ),
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -1001,9 +1515,108 @@ TOOLS = [
                 "sleeve_status": {"type": "string", "enum": ["sleeved", "to_sleeve", "na", "unknown"]},
                 "category_contains": {"type": "string", "description": "Substring on BGG category, e.g. 'Party Game'."},
                 "mechanic_contains": {"type": "string"},
+                "status": {"type": "string", "enum": ["owned", "wishlist", "any"],
+                            "description": "Defaults to 'owned'. Use 'wishlist' for desire-list searches, 'any' for cross-discovery (\"non lo possiedo, ma è in wishlist\")."},
                 "k": {"type": "integer", "description": "Top-k results (default 10)."},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "add_to_wishlist",
+        "description": (
+            "Add a game to the WISHLIST (wanted, not yet bought). UNLIKE add_game "
+            "(owned, requires confirmation), wishlist adds DO NOT need a propose-"
+            "table-then-wait ritual: the cost of an unwanted wishlist row is one "
+            "user click on '✗ Rimuovi'. When the user says 'aggiungi X alla "
+            "wishlist (con priorità Y)', just: (1) web_search BGG for metadata, "
+            "(2) optionally web_search sleeveyourgames for sleeve sizes, (3) call "
+            "this tool with the enriched fields, (4) if sleeve sizes were found, "
+            "follow up with set_sleeve_requirements (sleeve_status='unknown' on "
+            "wishlist allows it). Reply with ONE concise sentence: '✓ X aggiunto "
+            "in wishlist (priorità Y). Buste previste: …'. NEVER print a "
+            "confirmation table. Wishlist-only fields: `priority` (high/medium/"
+            "low), `notes_wishlist`, `target_price` (EUR). Use add_game (NOT this) "
+            "when the user already owns the game."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+                "notes_wishlist": {"type": "string"},
+                "target_price": {"type": "number", "description": "Target price in EUR."},
+                **_SCALAR_FIELDS,
+                **_LIST_FIELDS,
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "list_wishlist",
+        "description": (
+            "List wishlist items (wanted, not yet bought) as `{count, items}`. "
+            "Items are pre-sorted by priority (high → low → none). Filter by "
+            "`priority` to focus on what to buy first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+            },
+        },
+    },
+    {
+        "name": "update_wishlist",
+        "description": (
+            "Patch fields on a wishlist row. Wishlist-only fields are `priority`, "
+            "`notes_wishlist`, `target_price`. BGG enrichment fields work too "
+            "(re-run web_search later, fill in description, etc.). Refuses if "
+            "the row is already owned — use update_game then."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+                "notes_wishlist": {"type": "string"},
+                "target_price": {"type": "number"},
+                **_SCALAR_FIELDS,
+                **_LIST_FIELDS,
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "mark_as_owned",
+        "description": (
+            "Promote a wishlist row to owned. Single column flip — preserves all "
+            "BGG enrichment, description embedding, dimension bridges. Use when "
+            "the user says 'ho comprato X', 'è arrivato Y', 'finalmente preso Z'. "
+            "ALWAYS confirm with the user first ('Confermi che hai comprato X?') "
+            "before calling. Optional `sleeve_status` seeds the sleeve workflow."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "sleeve_status": {"type": "string", "enum": ["sleeved", "to_sleeve", "na", "unknown"],
+                                   "description": "Default 'unknown' if not specified."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "remove_from_wishlist",
+        "description": (
+            "Delete a wishlist row (not an owned game). Use when the user says "
+            "'tolgo X dalla wishlist', 'non lo voglio più', 'cambio idea su Y'. "
+            "ALWAYS confirm first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
         },
     },
     {
@@ -1085,12 +1698,19 @@ TOOL_FUNCS = {
     "delete_game":             delete_game,
     "set_sleeve_requirements": set_sleeve_requirements,
     "sleeve_summary":          sleeve_summary,
+    "sleeve_summary_wishlist": sleeve_summary_wishlist,
+    "games_ready_to_sleeve":   games_ready_to_sleeve,
     "list_inventory":          list_inventory,
     "update_inventory":        update_inventory,
     "add_to_inventory":        add_to_inventory,
     "recent_changes":          recent_changes,
     "list_dimension":          list_dimension,
     "search_games_semantic":   search_games_semantic,
+    "add_to_wishlist":         add_to_wishlist,
+    "list_wishlist":           list_wishlist,
+    "update_wishlist":         update_wishlist,
+    "mark_as_owned":           mark_as_owned,
+    "remove_from_wishlist":    remove_from_wishlist,
     "ingest_rulebook":         ingest_rulebook,
     "ask_rules":               ask_rules,
     "list_rulebooks":          list_rulebooks,

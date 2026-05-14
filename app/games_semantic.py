@@ -134,6 +134,7 @@ def search_semantic(
     sleeve_status: str | None = None,
     category_contains: str | None = None,
     mechanic_contains: str | None = None,
+    status: str = "owned",
     k: int = 10,
 ) -> list[dict]:
     """Hybrid search: SQL filters + cosine on description embedding.
@@ -157,6 +158,9 @@ def search_semantic(
     )
     params: list[Any] = []
     where: list[str] = ["g.description_embedding IS NOT NULL"]
+    if status and status != "any":
+        where.append("g.status = ?")
+        params.append(status)
 
     if category_contains:
         sql += (" JOIN game_categories bgc ON bgc.game_id=g.id "
@@ -205,20 +209,28 @@ def search_semantic(
     return [d for _, d in scored[:k]]
 
 
-def excluded_from_search() -> list[dict]:
+def excluded_from_search(status: str = "owned") -> list[dict]:
     """Games whose description_embedding is NULL — they are NEVER returned by
     `search_semantic`, so the model must mention them explicitly when the
     user asks about the whole collection.
+
+    Defaults to `status='owned'` to match `search_semantic`'s default scope:
+    the "ti ricordo che N giochi non sono inclusi" warning should reflect
+    the same universe the search actually scanned.
 
     Returns one dict per excluded game with the recorded `skip_reason` (or
     None if never attempted). Used by the `search_games_semantic` tool to
     surface a coverage warning alongside the ranked results.
     """
+    sql = ("SELECT id, name, description_skip_reason "
+           "FROM games WHERE description_embedding IS NULL")
+    params: list[Any] = []
+    if status and status != "any":
+        sql += " AND status = ?"
+        params.append(status)
+    sql += " ORDER BY name"
     with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT id, name, description_skip_reason "
-            "FROM games WHERE description_embedding IS NULL ORDER BY name"
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [
         {"name": r["name"], "skip_reason": r["description_skip_reason"]}
         for r in rows

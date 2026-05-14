@@ -13,6 +13,10 @@
     --row-hover: #1a1e27; --row-alt: #13161c;
     --pill: #232936; --pill-fg: #b9c0cc;
     --card: #161922;
+    /* Wishlist preview accent — picked purple because it's distinct from
+       both --accent (green, "owned/covered") and --warn (orange, "buy now"),
+       and reads as "planned / future" rather than urgent. */
+    --wish: #a78bfa; --wish-dim: #6d28d9;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; }
@@ -68,6 +72,7 @@
   .kpi .value { font-size: 28px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
   .kpi .value.warn { color: var(--warn); }
   .kpi .value.ok { color: var(--accent); }
+  .kpi .value.wish { color: var(--wish); }
   .kpi .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
   /* Tables */
@@ -240,6 +245,71 @@
     50%      { opacity: 1;   transform: scale(1.2); }
   }
 
+  /* Ready-to-sleeve cards — each game where inventory fully covers the
+     requirements. Card layout instead of a table because each entry is a
+     discrete actionable item, not part of an aggregation. Subtle green
+     border ties them to --accent ("good, you can do it") without shouting. */
+  .ready-grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  }
+  .ready-card {
+    background: var(--card); border: 1px solid var(--accent-dim);
+    border-radius: 10px; padding: 12px 14px;
+    display: flex; gap: 12px;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .ready-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .ready-card .thumb {
+    width: 56px; height: 56px; border-radius: 8px;
+    background: #0a0c10; flex-shrink: 0; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; font-weight: 700; color: rgba(255,255,255,0.45);
+  }
+  .ready-card .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .ready-card .body { flex: 1; min-width: 0; }
+  .ready-card .name {
+    font-weight: 600; font-size: 14px; color: var(--fg);
+    line-height: 1.25; margin-bottom: 6px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .ready-card .sizes { display: flex; flex-wrap: wrap; gap: 4px; }
+  .ready-card .size-chip {
+    background: rgba(95,184,120,0.12); color: var(--accent);
+    border: 1px solid var(--accent-dim);
+    padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 600; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .ready-card .total {
+    margin-top: 6px; font-size: 11.5px; color: var(--muted);
+  }
+  /* Contention warning banner — same shape as the empty-state but
+     warn-colored. Inline-block so it sits above the grid. */
+  .ready-contention {
+    margin-bottom: 12px; padding: 8px 12px;
+    background: rgba(245,158,11,0.10); border: 1px solid var(--warn);
+    border-radius: 8px; color: var(--warn); font-size: 13px;
+  }
+
+  /* Wishlist preview table — same shape as Da comprare but visually distinct.
+     Subtle purple tint on the section + the "needed" cell so the user knows
+     at a glance these are HYPOTHETICAL needs (you don't own the game yet),
+     not actionable to_buy. Lower visual weight than the main to_buy table. */
+  .wish-section table { border: 1px solid var(--wish-dim); }
+  .wish-section .wish-badge {
+    color: var(--wish); font-weight: 700;
+  }
+  .wish-section .new-size {
+    display: inline-block; margin-left: 6px;
+    padding: 1px 6px; border-radius: 4px;
+    background: rgba(167,139,250,0.15); color: var(--wish);
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px;
+    font-weight: 600;
+  }
+  .wish-section .games-trigger { color: var(--wish); }
+  .wish-section .games-trigger:hover { color: var(--fg); }
+
   .empty { color: var(--muted); font-style: italic; padding: 16px; text-align: center; }
   .toast {
     position: fixed; bottom: 24px; right: 24px; background: var(--card);
@@ -258,6 +328,7 @@
     <a href="/">Chat</a>
     <a href="/library">Libreria</a>
     <a href="/sleeves" class="active">Buste</a>
+    <a href="/wishlist">Wishlist</a>
   </nav>
   <span class="spacer"></span>
 </header>
@@ -280,10 +351,24 @@
     <div class="kpis" id="kpis"></div>
   </section>
 
+  <!-- Pronti da sleevare: games where inventory fully covers the
+       requirements. Sits before "Da comprare" because it's the most
+       immediately actionable section (what can I do NOW with what I have). -->
+  <section id="ready-section" style="display:none">
+    <h2>✂️ Pronti da sleevare <span class="muted-suffix" id="ready-meta"></span></h2>
+    <div id="ready-wrap"></div>
+  </section>
+
   <!-- Da comprare -->
   <section>
     <h2>🛒 Da comprare <span class="muted-suffix" id="tobuy-meta"></span></h2>
     <div id="tobuy-wrap"></div>
+  </section>
+
+  <!-- Buste per giochi in wishlist (preview, non incluse nel "Da comprare") -->
+  <section class="wish-section" id="wish-section" style="display:none">
+    <h2>🎁 Buste future <span class="muted-suffix" id="wish-meta"></span></h2>
+    <div id="wish-wrap"></div>
   </section>
 
   <!-- Inventario -->
@@ -337,26 +422,41 @@ async function load() {
   const r = await fetch("/sleeves/data");
   STATE.data = await r.json();
   renderKpis();
+  renderReady();
   renderToBuy();
+  renderWishPreview();
   renderInventory();
 }
 
 function renderKpis() {
   const k = STATE.data.kpis;
-  const html = [
+  const wish = k.wishlist_sleeves_total || 0;
+  const ready = k.ready_count || 0;
+  const cards = [
     {label:"Totale in magazzino", value:fmt(k.total_owned), klass:"ok", sub:"buste possedute"},
     {label:"Da comprare", value:fmt(k.total_to_buy), klass: k.total_to_buy > 0 ? "warn" : "ok",
      sub: k.total_to_buy > 0 ? "buste mancanti" : "tutto a posto ✓"},
     {label:"Misure coperte", value:`${k.sizes_covered} / ${k.sizes_total}`, klass:"",
      sub: "misure senza fabbisogno aperto"},
-  ].map(c => `
+  ];
+  // Conditional tiles — only render when there's actually something to show.
+  // Keeps the strip lean on day-1 (no wishlist, nothing ready) and grows
+  // organically as the user accumulates state.
+  if (ready > 0) {
+    cards.push({label:"✂️ Pronti da sleevare", value:fmt(ready), klass:"ok",
+                sub: ready === 1 ? "gioco ha tutte le buste" : "giochi hanno tutte le buste"});
+  }
+  if (wish > 0) {
+    cards.push({label:"🎁 Future (wishlist)", value:fmt(wish), klass:"wish",
+                sub:"da prevedere quando le compri"});
+  }
+  document.getElementById("kpis").innerHTML = cards.map(c => `
     <div class="kpi">
       <div class="label">${c.label}</div>
       <div class="value ${c.klass}">${c.value}</div>
       <div class="sub">${c.sub}</div>
     </div>
   `).join("");
-  document.getElementById("kpis").innerHTML = html;
 }
 
 function renderToBuy() {
@@ -385,6 +485,106 @@ function renderToBuy() {
             <td class="num right">${fmt(r.needed)}</td>
             <td class="num right">${fmt(r.owned)}</td>
             <td class="num right badge-tobuy">⚠️ ${fmt(r.to_buy)}</td>
+            <td>
+              <span class="games-trigger" onclick="this.parentElement.parentElement.classList.toggle('expanded')">
+                ${(r.games || "").split(", ").length} giochi
+              </span>
+              <div class="games-list">${escapeHtml(r.games || "")}</div>
+            </td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function readyThumbCell(g) {
+  // Tiny thumbnail card. Falls back to first letter on missing/broken image,
+  // same pattern as /library and /wishlist.
+  const initial = escapeHtml((g.name || "?").trim().charAt(0).toUpperCase());
+  if (g.thumbnail_url) {
+    return `<div class="thumb"><img src="${escapeHtml(g.thumbnail_url)}" alt="" loading="lazy" onerror="this.parentElement.textContent='${initial}'" /></div>`;
+  }
+  return `<div class="thumb">${initial}</div>`;
+}
+
+function renderReady() {
+  // "What you can sleeve right now": games whose entire sleeve_requirements
+  // list is satisfied by current inventory. Section hides itself when empty —
+  // no point showing "0 giochi pronti" on a fresh DB.
+  const payload = STATE.data.ready_to_sleeve || {};
+  const ready = payload.ready || [];
+  const section = document.getElementById("ready-section");
+  if (!ready.length) {
+    section.style.display = "none";
+    return;
+  }
+  section.style.display = "";
+
+  const totalSleeves = ready.reduce((s, g) => s + (g.total || 0), 0);
+  document.getElementById("ready-meta").textContent =
+    `${ready.length} ${ready.length === 1 ? "gioco pronto" : "giochi pronti"} · ${fmt(totalSleeves)} buste in totale`;
+
+  // Contention warning: rendered above the grid in --warn color when the
+  // greedy pass would yield fewer games than the per-game check found.
+  const banner = payload.has_contention
+    ? `<div class="ready-contention">${escapeHtml(payload.contention_note || "Conflitto di inventario tra alcuni giochi pronti.")}</div>`
+    : "";
+
+  const cards = ready.map(g => `
+    <div class="ready-card">
+      ${readyThumbCell(g)}
+      <div class="body">
+        <div class="name" title="${escapeHtml(g.name)}">${escapeHtml(g.name)}</div>
+        <div class="sizes">
+          ${g.reqs.map(r => `
+            <span class="size-chip">${r.count}× ${escapeHtml(r.width_mm === Math.floor(r.width_mm) ? r.width_mm : r.width_mm)}×${escapeHtml(r.height_mm === Math.floor(r.height_mm) ? r.height_mm : r.height_mm)} mm</span>
+          `).join("")}
+        </div>
+        <div class="total">Tot: ${fmt(g.total)} buste</div>
+      </div>
+    </div>
+  `).join("");
+
+  document.getElementById("ready-wrap").innerHTML = banner + `<div class="ready-grid">${cards}</div>`;
+}
+
+function renderWishPreview() {
+  // Wishlist sleeve demand: per-size totals from games with status='wishlist'.
+  // Rendered as a sister table to "Da comprare" but visually distinct so the
+  // user doesn't mistake hypothetical demand for actionable to_buy.
+  // Each row's "size" cell gets a "NUOVA MISURA" tag if the user has zero
+  // inventory for that size (already_covered=false) — easy way to spot
+  // "things I need to start stocking even before buying the game".
+  const rows = STATE.data.wishlist_preview || [];
+  const section = document.getElementById("wish-section");
+  if (!rows.length) {
+    section.style.display = "none";
+    return;
+  }
+  section.style.display = "";
+  const total = rows.reduce((s, r) => s + (r.needed || 0), 0);
+  const newSizes = rows.filter(r => !r.already_covered).length;
+  const metaParts = [`${rows.length} ${rows.length === 1 ? "misura" : "misure"}`, `${fmt(total)} buste`];
+  if (newSizes > 0) metaParts.push(`${newSizes} misura/e nuove`);
+  document.getElementById("wish-meta").textContent =
+    "(non incluse nel \"Da comprare\") · " + metaParts.join(" · ");
+
+  document.getElementById("wish-wrap").innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Misura</th>
+        <th class="right">Servirebbero</th>
+        <th>Per quali giochi (wishlist)</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((r, i) => `
+          <tr data-i="${i}">
+            <td>
+              <strong>${r.size}</strong> mm
+              ${r.already_covered ? "" : `<span class="new-size" title="Non hai ancora questa misura in inventario">nuova misura</span>`}
+            </td>
+            <td class="num right wish-badge">🎁 ${fmt(r.needed)}</td>
             <td>
               <span class="games-trigger" onclick="this.parentElement.parentElement.classList.toggle('expanded')">
                 ${(r.games || "").split(", ").length} giochi

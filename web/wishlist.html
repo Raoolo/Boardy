@@ -1,0 +1,952 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<title>Boardy — Lista desideri</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115; --fg: #e6e7eb; --muted: #8a8f99;
+    --accent: #5fb878; --accent-dim: #3a7c4f;
+    --border: #222831; --field: #181b22; --field-edge: #2a2f3a;
+    --row-hover: #1a1e27; --row-alt: #13161c;
+    --pill: #232936; --pill-fg: #b9c0cc;
+    --p-high: #f87171; --p-med: #facc15; --p-low: #a3e635;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    padding: 14px 24px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h1 .accent { color: var(--accent); }
+  header .spacer { flex: 1; }
+  nav { display: flex; gap: 8px; }
+  nav a {
+    color: var(--muted); text-decoration: none; font-size: 13px;
+    border: 1px solid var(--field-edge); padding: 6px 12px; border-radius: 8px;
+  }
+  nav a:hover { color: var(--accent); border-color: var(--accent); }
+  nav a.active { color: var(--accent); border-color: var(--accent); }
+  #count { color: var(--muted); font-size: 13px; }
+
+  /* KPI cards */
+  .kpis { display: flex; gap: 12px; padding: 18px 24px 0; flex-wrap: wrap; }
+  .kpi {
+    background: var(--field); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 16px; min-width: 130px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .kpi .label { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .kpi .value { font-size: 22px; font-weight: 700; color: var(--fg); }
+  .kpi.high .value { color: var(--p-high); }
+  .kpi.medium .value { color: var(--p-med); }
+  .kpi.low .value { color: var(--p-low); }
+
+  /* Chat-dock — wishlist-focused AI chat. Sits below the KPI tiles so the
+     dashboard hierarchy reads "metrics → action → list".
+
+     Static layout (no focus-within width animation): the bouncy expansion
+     used on /sleeves felt out of place here. The dock is already nested
+     inside the page (margin + border-radius card), so growing it on focus
+     fought the surrounding KPI/filter rhythm. Static + soft focus glow on
+     the textarea — same restraint as /library's smart-dock — keeps the
+     emphasis local to the input field.
+
+     What still sets it apart from / (the generic chat): the system prompt
+     nudge and the two structured shortcuts (priority + target price) baked
+     into the input row. The user can describe the game in prose AND pin
+     priority/€ with the dropdowns — the JS prepends those as a structured
+     hint to the message so the model doesn't have to infer them. */
+  .chat-dock {
+    margin: 18px 24px 0;
+    background: #11141a; border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px 16px;
+  }
+  /* Inner wrapper kept for structural symmetry with the sibling sections
+     but no transition / max-width games — fills its container statically. */
+  .chat-dock-inner { width: 100%; }
+  .chat-dock h2 {
+    margin: 0 0 10px; font-size: 15px; font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .chat-dock h2 .accent { color: var(--accent); }
+  .chat-dock .hint { color: var(--muted); font-size: 12px; font-weight: 400; }
+  .chat-row { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+  .chat-row textarea {
+    flex: 1 1 100%; min-width: 0;
+    min-height: 38px; max-height: 120px; resize: none;
+    background: var(--field); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 8px;
+    padding: 9px 12px; font-size: 13px; font-family: inherit;
+    line-height: 1.4;
+    transition: border-color 180ms ease, box-shadow 220ms ease;
+  }
+  .chat-row textarea:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(95, 184, 120, 0.18);
+  }
+  /* Second row: structured shortcuts (priority/€) + action buttons.
+     Stacking these under the textarea keeps the textarea full-width while
+     the shortcuts read as "modifiers" rather than competing inputs. */
+  .chat-controls {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-controls .shortcut-label {
+    color: var(--muted); font-size: 11.5px; text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .chat-controls select, .chat-controls input {
+    background: var(--field); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 8px;
+    padding: 6px 10px; font-size: 12.5px; font-family: inherit;
+  }
+  .chat-controls select:focus, .chat-controls input:focus {
+    outline: none; border-color: var(--accent);
+  }
+  .chat-controls input.target-price { width: 90px; }
+  .chat-controls .spacer { flex: 1; }
+  .chat-controls .send {
+    background: var(--accent-dim); color: var(--fg);
+    border: 1px solid var(--accent); border-radius: 8px;
+    padding: 7px 18px; font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: inherit;
+  }
+  .chat-controls .send:hover { background: var(--accent); }
+  .chat-controls .send:disabled { opacity: 0.5; cursor: default; }
+  .chat-controls .reset-conv {
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--field-edge); border-radius: 8px;
+    padding: 7px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit;
+  }
+  .chat-controls .reset-conv:hover { color: var(--accent); border-color: var(--accent); }
+  .chat-status {
+    margin-top: 10px; min-height: 18px;
+    font-size: 12.5px; color: var(--muted);
+    transition: color 0.2s;
+    overflow: hidden; text-overflow: ellipsis;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .chat-status.thinking { color: var(--p-med); }
+  .chat-status.success  { color: var(--accent); }
+  .chat-status.error    { color: var(--p-high); }
+  /* Pulse dot when thinking — same pattern as /library + /sleeves. Inside a
+     -webkit-box we can't use a flex layout for the dot, so we use an
+     ::after pseudo whose width/height + margin gives it inline placement. */
+  .chat-status.thinking::after {
+    content: " ●";
+    animation: chat-pulse 1s ease-in-out infinite;
+  }
+  @keyframes chat-pulse {
+    0%, 100% { opacity: 0.3; }
+    50%      { opacity: 1; }
+  }
+
+  /* Filters bar */
+  .filters {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    padding: 14px 24px; border-bottom: 1px solid var(--border);
+    background: #11141a;
+  }
+  .filters > input, .filters > select {
+    background: var(--field); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 8px;
+    padding: 8px 12px; font-size: 13px; font-family: inherit;
+    min-width: 140px;
+  }
+  .filters > input[type=text] { min-width: 220px; flex: 1; max-width: 360px; }
+  .filters > input:focus, .filters > select:focus {
+    outline: none; border-color: var(--accent);
+  }
+  .filters .reset {
+    background: transparent; color: var(--muted); border: 1px solid var(--field-edge);
+    padding: 8px 14px; border-radius: 8px; font-size: 13px; cursor: pointer;
+    font-family: inherit;
+  }
+  .filters .reset:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* View toggle */
+  .view-toggle { display: flex; gap: 0; margin-left: auto; }
+  .view-toggle button {
+    background: var(--field); color: var(--muted);
+    border: 1px solid var(--field-edge);
+    padding: 8px 14px; font-size: 13px; cursor: pointer;
+    font-family: inherit;
+  }
+  .view-toggle button:first-child { border-radius: 8px 0 0 8px; border-right: none; }
+  .view-toggle button:last-child  { border-radius: 0 8px 8px 0; }
+  .view-toggle button.active {
+    background: var(--accent-dim); color: var(--fg); border-color: var(--accent);
+  }
+  .view-toggle button:hover:not(.active) { color: var(--accent); border-color: var(--accent); }
+
+  /* Table */
+  .wrap { padding: 18px 24px 40px; overflow-x: auto; }
+  table {
+    width: 100%; border-collapse: separate; border-spacing: 0;
+    font-size: 13.5px; min-width: 900px;
+    table-layout: fixed;
+  }
+  col.c-prio    { width: 100px; }
+  col.c-name    { width: 22%; }
+  col.c-year    { width: 60px; }
+  col.c-players { width: 100px; }
+  col.c-dur     { width: 80px; }
+  col.c-weight  { width: 130px; }
+  col.c-price   { width: 90px; }
+  col.c-notes   { width: auto; }
+  col.c-act     { width: 140px; }
+  th, td {
+    padding: 10px 12px; text-align: left; vertical-align: top;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: #161922; color: var(--muted); font-weight: 600;
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px;
+    position: sticky; top: 0; z-index: 1;
+    cursor: pointer; user-select: none;
+  }
+  th:hover { color: var(--accent); }
+  th .arrow { font-size: 10px; color: var(--accent); margin-left: 4px; }
+  tbody tr:nth-child(even) { background: var(--row-alt); }
+  tbody tr:hover { background: var(--row-hover); }
+  td.name { font-weight: 600; }
+  td.name a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--accent-dim); }
+  td.name a:hover { color: var(--accent); }
+  td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  td.muted { color: var(--muted); font-style: italic; font-size: 12px; }
+  td .year { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+  td.notes-cell { font-size: 12.5px; color: var(--pill-fg); }
+
+  /* Priority chip */
+  .prio {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 700; white-space: nowrap;
+    text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  .prio.high   { background: rgba(248,113,113,0.18); color: var(--p-high); }
+  .prio.medium { background: rgba(250,204,21,0.18); color: var(--p-med); }
+  .prio.low    { background: rgba(163,230,53,0.15); color: var(--p-low); }
+  .prio.none   { background: rgba(138,143,153,0.18); color: var(--muted); }
+  /* Inline priority dropdown (in row) */
+  select.prio-edit {
+    background: transparent; color: inherit;
+    border: 1px dashed var(--field-edge); border-radius: 6px;
+    padding: 2px 6px; font-size: 11.5px; font-family: inherit;
+    cursor: pointer;
+  }
+  select.prio-edit:focus { outline: none; border-color: var(--accent); }
+
+  /* Action buttons */
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn {
+    background: var(--field); color: var(--fg);
+    border: 1px solid var(--field-edge); border-radius: 6px;
+    padding: 4px 10px; font-size: 12px; cursor: pointer;
+    font-family: inherit;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.buy { background: rgba(95,184,120,0.15); border-color: var(--accent-dim); color: var(--accent); }
+  .btn.buy:hover { background: var(--accent-dim); color: var(--fg); }
+  .btn.del:hover { border-color: var(--p-high); color: var(--p-high); }
+
+  /* Empty state */
+  .empty { padding: 80px 24px; text-align: center; color: var(--muted); }
+  .empty.first { color: var(--fg); font-size: 15px; }
+  .empty.first .hint { color: var(--muted); font-size: 13px; margin-top: 8px; display: block; }
+
+  /* Grid view */
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  .card {
+    background: var(--field); border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden;
+    display: flex; flex-direction: column;
+    transition: border-color 0.15s, transform 0.15s;
+    position: relative;
+  }
+  .card:hover { border-color: var(--accent-dim); transform: translateY(-2px); }
+  .card .thumb {
+    width: 100%; aspect-ratio: 1 / 1; background: #0a0c10;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .card .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card .thumb.placeholder {
+    background: linear-gradient(135deg,
+      hsl(var(--hue, 200), 32%, 22%),
+      hsl(calc(var(--hue, 200) + 30), 28%, 13%));
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 56px; font-weight: 700; letter-spacing: -1px;
+    user-select: none;
+  }
+  .card .prio-badge {
+    position: absolute; top: 8px; left: 8px; z-index: 1;
+  }
+  .card .body { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+  .card .title {
+    font-size: 13.5px; font-weight: 600;
+    line-height: 1.25;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .card .title a { color: inherit; text-decoration: none; }
+  .card .title a:hover { color: var(--accent); }
+  .card .meta { color: var(--muted); font-size: 11.5px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .card .price { color: var(--accent); font-weight: 600; font-size: 12px; }
+  .card .actions { margin-top: auto; }
+
+  /* Modal — minimal Promise-based confirm. Same shape as chat's confirmDialog. */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center;
+    z-index: 1000;
+  }
+  .modal-backdrop.show { display: flex; }
+  .modal {
+    background: var(--field); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px 20px; max-width: 420px; width: 90%;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  }
+  .modal h3 { margin: 0 0 10px; font-size: 16px; }
+  .modal p { margin: 0 0 14px; font-size: 13.5px; color: var(--pill-fg); line-height: 1.5; }
+  .modal .row { display: flex; gap: 8px; justify-content: flex-end; }
+  .modal .btn { padding: 7px 14px; font-size: 13px; }
+  .modal .btn.primary {
+    background: var(--accent-dim); color: var(--fg); border-color: var(--accent);
+  }
+  .modal .btn.primary:hover { background: var(--accent); }
+  .modal .btn.danger:hover { border-color: var(--p-high); color: var(--p-high); }
+
+  /* BGG attribution footer — same whisper-quiet styling as other pages. */
+  footer.bgg-attr {
+    padding: 8px 24px;
+    display: flex; justify-content: flex-end; align-items: center;
+    background: transparent;
+  }
+  footer.bgg-attr a { display: inline-flex; opacity: 0.55; transition: opacity 150ms ease; }
+  footer.bgg-attr a:hover { opacity: 1; }
+  footer.bgg-attr img { height: 16px; width: auto; display: block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bo<span class="accent">ardy</span> · Lista desideri</h1>
+  <nav>
+    <a href="/">Chat</a>
+    <a href="/library">Libreria</a>
+    <a href="/sleeves">Buste</a>
+    <a href="/wishlist" class="active">Wishlist</a>
+  </nav>
+  <span id="count"></span>
+  <span class="spacer"></span>
+</header>
+
+<section class="kpis" id="kpis"></section>
+
+<section class="chat-dock">
+  <div class="chat-dock-inner">
+    <h2>💬 <span class="accent">Chat wishlist</span> <span class="hint">— "aggiungi Brass Birmingham" oppure "togli Spirit Island", "alza la priorità di X". Il bot fa web-search BGG e aggiunge subito; rimuovi con un click se sbaglia.</span></h2>
+    <div class="chat-row">
+      <textarea id="chat-input" placeholder="Scrivi cosa vuoi fare con la wishlist…" rows="1"></textarea>
+    </div>
+    <div class="chat-controls">
+      <span class="shortcut-label">Suggerimenti:</span>
+      <select id="chat-prio" title="Quando aggiungi un gioco, il bot userà questa priorità.">
+        <option value="">Priorità (lascia decidere al bot)</option>
+        <option value="high">🔴 Alta</option>
+        <option value="medium">🟡 Media</option>
+        <option value="low">🟢 Bassa</option>
+      </select>
+      <input type="number" id="chat-price" class="target-price" placeholder="€ target" step="0.01" min="0" title="Se valorizzato, viene passato al bot come target_price." />
+      <span class="spacer"></span>
+      <button class="send" id="chat-send">Invia</button>
+      <button class="reset-conv" id="chat-reset" title="Avvia una nuova conversazione (perde il contesto multi-turno).">Nuova chat</button>
+    </div>
+    <div class="chat-status" id="chat-status"></div>
+  </div>
+</section>
+
+<div class="filters">
+  <input type="text" id="q" placeholder="🔎 Cerca per nome…" />
+  <select id="filter-prio">
+    <option value="">Priorità (tutte)</option>
+    <option value="high">🔴 Alta</option>
+    <option value="medium">🟡 Media</option>
+    <option value="low">🟢 Bassa</option>
+    <option value="none">○ Senza priorità</option>
+  </select>
+  <button class="reset" id="reset">Azzera filtri</button>
+  <div class="view-toggle" id="viewToggle">
+    <button data-view="table" class="active" title="Tabella">▦ Tabella</button>
+    <button data-view="grid" title="Griglia">▥ Griglia</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <table id="tbl">
+    <colgroup>
+      <col class="c-prio" />
+      <col class="c-name" />
+      <col class="c-year" />
+      <col class="c-players" />
+      <col class="c-dur" />
+      <col class="c-weight" />
+      <col class="c-price" />
+      <col class="c-notes" />
+      <col class="c-act" />
+    </colgroup>
+    <thead>
+      <tr>
+        <th data-sort="priority">Priorità</th>
+        <th data-sort="name">Nome</th>
+        <th data-sort="year" class="num">Anno</th>
+        <th>Giocatori</th>
+        <th data-sort="duration" class="num">Durata</th>
+        <th data-sort="weight">Complessità</th>
+        <th data-sort="price" class="num">€ target</th>
+        <th>Note</th>
+        <th>Azioni</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="grid" class="grid" style="display:none"></div>
+  <div id="empty" class="empty" style="display:none">Nessun gioco trovato con questi filtri.</div>
+  <div id="empty-first" class="empty first" style="display:none">
+    🎁 La tua wishlist è vuota.<span class="hint">Scrivi nella chat qui sopra, p.es. <em>"aggiungi Brass Birmingham, l'ho visto da Marco"</em>. Il bot fa web-search BGG e aggiunge subito — se sbaglia, rimuovi con un click.</span>
+  </div>
+</div>
+
+<!-- Confirm modal. Promise-resolves on click. Reused for buy + delete. -->
+<div class="modal-backdrop" id="modal">
+  <div class="modal">
+    <h3 id="modal-title">Conferma</h3>
+    <p id="modal-msg"></p>
+    <div class="row">
+      <button class="btn" id="modal-cancel">Annulla</button>
+      <button class="btn primary" id="modal-ok">Conferma</button>
+    </div>
+  </div>
+</div>
+
+<footer class="bgg-attr">
+  <a href="https://boardgamegeek.com/" target="_blank" rel="noopener" title="Powered by BoardGameGeek">
+    <img src="/static/powered-by-bgg-rgb.svg" alt="Powered by BGG">
+  </a>
+</footer>
+
+<script>
+const PRIO_RANK = { high: 0, medium: 1, low: 2 };
+const PRIO_LABEL = { high: "🔴 Alta", medium: "🟡 Media", low: "🟢 Bassa" };
+
+const state = {
+  items: [],
+  filtered: [],
+  view: localStorage.getItem("wishlist.view") || "table",
+  sortKey: "priority",
+  sortDir: 1,
+};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function fmtPrice(p) {
+  if (p == null) return `<span class="muted">—</span>`;
+  return `€ ${Number(p).toFixed(2)}`;
+}
+
+function fmtPlayers(g) {
+  if (g.players_min == null && g.players_max == null) return "—";
+  if (g.players_min === g.players_max) return `${g.players_min}`;
+  return `${g.players_min}–${g.players_max}`;
+}
+
+function fmtDuration(g) {
+  if (g.duration_min_min && g.duration_max_min && g.duration_min_min !== g.duration_max_min) {
+    return `${g.duration_min_min}–${g.duration_max_min}'`;
+  }
+  if (g.duration_min) return `${g.duration_min}'`;
+  return "—";
+}
+
+function fmtComplexity(g) {
+  if (g.complexity_weight == null) return `<span class="muted">—</span>`;
+  const label = (g.complexity_label || "").replace(/^\d+\.\s*/, "");
+  return `<span class="prio low">${label || "?"} · ${g.complexity_weight.toFixed(1)}</span>`;
+}
+
+// Inline-editable priority cell. Change → POST /wishlist/update and reload.
+function prioEditor(g) {
+  const opts = ["", "high", "medium", "low"].map(v => {
+    const sel = (v === (g.priority || "")) ? "selected" : "";
+    const lbl = v === "" ? "○ Nessuna" : PRIO_LABEL[v];
+    return `<option value="${v}" ${sel}>${lbl}</option>`;
+  }).join("");
+  return `<select class="prio-edit" data-name="${escapeHtml(g.name)}">${opts}</select>`;
+}
+
+function nameCell(g) {
+  const year = g.year_published ? `<span class="year">(${g.year_published})</span>` : "";
+  if (g.bgg_id) {
+    return `<a href="https://boardgamegeek.com/boardgame/${g.bgg_id}" target="_blank" rel="noopener">${escapeHtml(g.name)}</a> ${year}`;
+  }
+  return `${escapeHtml(g.name)} ${year}`;
+}
+
+function actionButtons(g) {
+  return `<div class="actions">
+    <button class="btn buy"  data-act="buy"   data-name="${escapeHtml(g.name)}">✓ Comprato</button>
+    <button class="btn del"  data-act="del"   data-name="${escapeHtml(g.name)}">✗ Rimuovi</button>
+  </div>`;
+}
+
+function thumbHue(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h + name.charCodeAt(i) * 31) % 360;
+  return h;
+}
+
+function cardThumb(g) {
+  const initial = escapeHtml((g.name || "?").trim().charAt(0).toUpperCase());
+  const hue = thumbHue(g.name || "");
+  if (g.thumbnail_url) {
+    return `<div class="thumb" style="--hue:${hue}" data-initial="${initial}"><img src="${escapeHtml(g.thumbnail_url)}" alt="" loading="lazy" onerror="thumbFallback(this)" /></div>`;
+  }
+  return `<div class="thumb placeholder" style="--hue:${hue}">${initial}</div>`;
+}
+
+function thumbFallback(img) {
+  const wrap = img.parentElement;
+  if (!wrap) return;
+  wrap.classList.add("placeholder");
+  wrap.textContent = wrap.dataset.initial || "?";
+}
+
+function prioBadge(g) {
+  const p = g.priority;
+  if (!p) return `<span class="prio none">○ Nessuna</span>`;
+  return `<span class="prio ${p}">${PRIO_LABEL[p]}</span>`;
+}
+
+function sortKeyValue(g, key) {
+  switch (key) {
+    case "priority": return PRIO_RANK[g.priority] ?? 99;
+    case "name":     return (g.name || "").toLowerCase();
+    case "year":     return g.year_published ?? -1;
+    case "duration": return g.duration_max_min ?? g.duration_min ?? 0;
+    case "weight":   return g.complexity_weight ?? 0;
+    case "price":    return g.target_price ?? Infinity; // unset prices sort last asc
+    default: return 0;
+  }
+}
+
+function applyFilters() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const filterPrio = document.getElementById("filter-prio").value;
+  state.filtered = state.items.filter(g => {
+    if (q && !(g.name || "").toLowerCase().includes(q)) return false;
+    if (filterPrio === "none") { if (g.priority) return false; }
+    else if (filterPrio) { if (g.priority !== filterPrio) return false; }
+    return true;
+  });
+  state.filtered.sort((a, b) => {
+    const va = sortKeyValue(a, state.sortKey);
+    const vb = sortKeyValue(b, state.sortKey);
+    if (va < vb) return -1 * state.sortDir;
+    if (va > vb) return  1 * state.sortDir;
+    return 0;
+  });
+  render();
+}
+
+function renderRows() {
+  const tbody = document.getElementById("rows");
+  tbody.innerHTML = state.filtered.map(g => `
+    <tr>
+      <td>${prioEditor(g)}</td>
+      <td class="name">${nameCell(g)}</td>
+      <td class="num muted">${g.year_published ?? "—"}</td>
+      <td>${fmtPlayers(g)}</td>
+      <td class="num">${fmtDuration(g)}</td>
+      <td>${fmtComplexity(g)}</td>
+      <td class="num">${fmtPrice(g.target_price)}</td>
+      <td class="notes-cell">${g.notes_wishlist ? escapeHtml(g.notes_wishlist) : `<span class="muted">—</span>`}</td>
+      <td>${actionButtons(g)}</td>
+    </tr>
+  `).join("");
+}
+
+function renderGrid() {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = state.filtered.map(g => `
+    <div class="card">
+      ${cardThumb(g)}
+      <div class="prio-badge">${prioBadge(g)}</div>
+      <div class="body">
+        <div class="title">${nameCell(g)}</div>
+        <div class="meta">
+          ${fmtPlayers(g) !== "—" ? `<span>👥 ${fmtPlayers(g)}</span>` : ""}
+          ${fmtDuration(g) !== "—" ? `<span>⏱ ${fmtDuration(g)}</span>` : ""}
+        </div>
+        ${g.target_price != null ? `<div class="price">${fmtPrice(g.target_price)}</div>` : ""}
+        ${g.notes_wishlist ? `<div class="meta">${escapeHtml(g.notes_wishlist)}</div>` : ""}
+        ${actionButtons(g)}
+      </div>
+    </div>
+  `).join("");
+}
+
+function render() {
+  const n = state.filtered.length;
+  document.getElementById("count").textContent = `${n} ${n === 1 ? "gioco" : "giochi"}`;
+  const tbl = document.getElementById("tbl");
+  const grid = document.getElementById("grid");
+  const empty = document.getElementById("empty");
+  const emptyFirst = document.getElementById("empty-first");
+
+  // Two distinct empty states: truly empty wishlist (welcoming hint) vs.
+  // filtered-down-to-zero (neutral).
+  if (!state.items.length) {
+    tbl.style.display = "none"; grid.style.display = "none";
+    empty.style.display = "none"; emptyFirst.style.display = "block";
+    document.getElementById("rows").innerHTML = ""; grid.innerHTML = "";
+  } else if (!n) {
+    tbl.style.display = "none"; grid.style.display = "none";
+    empty.style.display = "block"; emptyFirst.style.display = "none";
+    document.getElementById("rows").innerHTML = ""; grid.innerHTML = "";
+  } else {
+    empty.style.display = "none"; emptyFirst.style.display = "none";
+    if (state.view === "grid") {
+      tbl.style.display = "none"; grid.style.display = "";
+      renderGrid();
+    } else {
+      grid.style.display = "none"; tbl.style.display = "";
+      renderRows();
+    }
+  }
+
+  document.querySelectorAll("th[data-sort]").forEach(th => {
+    const arrow = th.querySelector(".arrow");
+    if (arrow) arrow.remove();
+    if (th.dataset.sort === state.sortKey) {
+      const span = document.createElement("span");
+      span.className = "arrow";
+      span.textContent = state.sortDir === 1 ? "▲" : "▼";
+      th.appendChild(span);
+    }
+  });
+  document.querySelectorAll("#viewToggle button").forEach(b => {
+    b.classList.toggle("active", b.dataset.view === state.view);
+  });
+}
+
+function renderKpis(counts) {
+  const total = (counts.high || 0) + (counts.medium || 0) + (counts.low || 0) + (counts.none || 0);
+  document.getElementById("kpis").innerHTML = `
+    <div class="kpi"><span class="label">Totale</span><span class="value">${total}</span></div>
+    <div class="kpi high"><span class="label">🔴 Alta</span><span class="value">${counts.high || 0}</span></div>
+    <div class="kpi medium"><span class="label">🟡 Media</span><span class="value">${counts.medium || 0}</span></div>
+    <div class="kpi low"><span class="label">🟢 Bassa</span><span class="value">${counts.low || 0}</span></div>
+  `;
+}
+
+async function load() {
+  const r = await fetch("/wishlist/data");
+  const data = await r.json();
+  state.items = data.items;
+  renderKpis(data.counts);
+  applyFilters();
+}
+
+// ── Chat dock (wishlist-focused AI chat) ──────────────────────────────
+// Multi-turn conversation persisted via conversation_id in localStorage,
+// same shape as /sleeves. The structured shortcuts (priority + €) are
+// prepended to the user's message as a hint block so the model doesn't
+// have to infer them — the bot still validates and confirms before
+// calling any write tool.
+const CHAT_KEY = "boardy_wishlist_conv_id";
+let CHAT = { convId: null };
+
+function setChatConvId(id) {
+  CHAT.convId = id;
+  if (id) localStorage.setItem(CHAT_KEY, String(id));
+  else    localStorage.removeItem(CHAT_KEY);
+}
+
+// Flatten markdown into a one-line readable status. The assistant tends to
+// use **bold** / bullet lists, which would surface as literal tokens in the
+// 2-row clamp. Same regex chain as /sleeves' stripMarkdown.
+function stripMarkdown(s) {
+  if (!s) return "";
+  return String(s)
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/(\*|_)(.*?)\1/g, "$2")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "· ")
+    .replace(/\s*\n+\s*/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function setChatStatus(text, kind = "") {
+  const el = document.getElementById("chat-status");
+  el.textContent = stripMarkdown(text);
+  el.className = `chat-status ${kind}`;
+}
+
+// Normalize either Anthropic-shape (content=array of blocks) or DeepSeek/
+// OpenAI-shape (content=string) histories and return the latest assistant
+// text. Without this the status line would silently skip turns from the
+// DeepSeek provider (LEARNINGS 2026-05-01).
+function lastAssistantText(history) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const t = history[i];
+    if (t.role !== "assistant") continue;
+    if (Array.isArray(t.content)) {
+      const txt = t.content.filter(b => b.type === "text")
+                           .map(b => b.text).join("\n").trim();
+      if (txt) return txt;
+    } else if (typeof t.content === "string" && t.content.trim()) {
+      return t.content.trim();
+    }
+  }
+  return "";
+}
+
+// Fingerprint of wishlist state. If a chat turn changes the row count, total
+// price, or per-priority distribution, the bot did a write → green status.
+// Pure Q&A turns leave the fingerprint unchanged → neutral status.
+function wishlistFingerprint() {
+  if (!state.items) return "";
+  const total = state.items.length;
+  const sumPrice = state.items.reduce((s, i) => s + (i.target_price || 0), 0);
+  const byPrio = state.items.map(i => i.priority || "_").sort().join(",");
+  return `${total}|${sumPrice.toFixed(2)}|${byPrio}`;
+}
+
+async function loadChatConv() {
+  const saved = localStorage.getItem(CHAT_KEY);
+  if (!saved) return;
+  try {
+    const r = await fetch("/conversations/" + saved);
+    if (!r.ok) { setChatConvId(null); return; }
+    const c = await r.json();
+    CHAT.convId = c.id;
+    const txt = lastAssistantText(c.history || []);
+    if (txt) setChatStatus(txt, "");
+  } catch (e) { setChatConvId(null); }
+}
+
+// Build the message we actually send: user prose + structured hints if the
+// shortcut fields are valorized. Hints go AFTER the user text on a separate
+// line so they read as metadata, not as the request itself.
+function composeMessage(userText, prio, price) {
+  const hints = [];
+  if (prio)  hints.push(`priority=${prio}`);
+  if (price !== null && !Number.isNaN(price)) hints.push(`target_price=${price}€`);
+  if (!hints.length) return userText;
+  return `${userText}\n\n[shortcut suggeriti dall'UI: ${hints.join(", ")}]`;
+}
+
+async function sendChat() {
+  const ta = document.getElementById("chat-input");
+  const msg = ta.value.trim();
+  if (!msg) return;
+  const prio = document.getElementById("chat-prio").value || null;
+  const priceRaw = document.getElementById("chat-price").value;
+  const price = priceRaw ? parseFloat(priceRaw) : null;
+  const composed = composeMessage(msg, prio, price);
+
+  const send = document.getElementById("chat-send");
+  send.disabled = true;
+  setChatStatus("Sto pensando", "thinking");
+  const fpBefore = wishlistFingerprint();
+
+  try {
+    const r = await fetch("/chat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message: composed, conversation_id: CHAT.convId}),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    setChatConvId(data.conversation_id);
+
+    // Refresh the table — the bot may have added/promoted/removed items.
+    // Must run BEFORE the fingerprint diff so we compare new vs pre-turn.
+    await load();
+
+    const reply = lastAssistantText(data.history) || "Fatto.";
+    const changed = wishlistFingerprint() !== fpBefore;
+    setChatStatus(reply, changed ? "success" : "");
+
+    ta.value = "";
+    ta.style.height = "auto";
+    // Reset only the shortcut hints (not the prompt input) so the user can
+    // chain another op without re-typing the prose. Decision: keep prio/€
+    // sticky? No — they're per-turn modifiers; sticky would silently
+    // pollute the next add.
+    document.getElementById("chat-prio").value = "";
+    document.getElementById("chat-price").value = "";
+  } catch (e) {
+    setChatStatus(`⚠ Errore: ${e.message}`, "error");
+  } finally {
+    send.disabled = false;
+    ta.focus();
+  }
+}
+
+document.getElementById("chat-send").addEventListener("click", sendChat);
+document.getElementById("chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendChat();
+  }
+});
+document.getElementById("chat-input").addEventListener("input", (e) => {
+  e.target.style.height = "auto";
+  e.target.style.height = Math.min(120, e.target.scrollHeight) + "px";
+});
+document.getElementById("chat-reset").addEventListener("click", () => {
+  setChatConvId(null);
+  setChatStatus("Nuova chat avviata", "success");
+});
+
+// ── Filters & sort ─────────────────────────────────────────────────────
+["q", "filter-prio"].forEach(id => {
+  document.getElementById(id).addEventListener("input", applyFilters);
+});
+document.getElementById("reset").addEventListener("click", () => {
+  document.getElementById("q").value = "";
+  document.getElementById("filter-prio").value = "";
+  applyFilters();
+});
+document.querySelectorAll("th[data-sort]").forEach(th => {
+  th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    if (state.sortKey === k) state.sortDir *= -1;
+    else { state.sortKey = k; state.sortDir = 1; }
+    applyFilters();
+  });
+});
+document.querySelectorAll("#viewToggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    state.view = btn.dataset.view;
+    localStorage.setItem("wishlist.view", state.view);
+    render();
+  });
+});
+
+// ── Row actions (event delegation) ─────────────────────────────────────
+// Priority editor: inline change updates the row without confirmation —
+// low-stakes, easily reverted.
+document.addEventListener("change", async (e) => {
+  const sel = e.target.closest("select.prio-edit");
+  if (!sel) return;
+  const name = sel.dataset.name;
+  const newPrio = sel.value || null;
+  try {
+    const r = await fetch("/wishlist/update", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, priority: newPrio}),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await load();
+  } catch (err) {
+    alert("Errore aggiornamento priorità: " + err.message);
+  }
+});
+
+// Buy + delete: confirm via modal first.
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const name = btn.dataset.name;
+  const act = btn.dataset.act;
+
+  if (act === "buy") {
+    const ok = await confirmDialog(
+      "Comprato!",
+      `Vuoi promuovere <strong>${escapeHtml(name)}</strong> nella libreria? ` +
+      `Tutto l'arricchimento BGG eventualmente presente verrà preservato. ` +
+      `Lo stato buste partirà come "sconosciuto".`,
+      "Sì, l'ho comprato");
+    if (!ok) return;
+    const r = await fetch("/wishlist/buy", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, sleeve_status: "unknown"}),
+    });
+    if (!r.ok) { alert("Errore: " + await r.text()); return; }
+    await load();
+  } else if (act === "del") {
+    const ok = await confirmDialog(
+      "Rimuovi dalla wishlist",
+      `Eliminare <strong>${escapeHtml(name)}</strong> dalla lista desideri? ` +
+      `Resterà nel log audit ma scomparirà da qui.`,
+      "Sì, rimuovi", "danger");
+    if (!ok) return;
+    const r = await fetch("/wishlist/remove", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name}),
+    });
+    if (!r.ok) { alert("Errore: " + await r.text()); return; }
+    await load();
+  }
+});
+
+// ── Custom confirm modal — Promise-based, Esc/Enter/backdrop wired ──
+function confirmDialog(title, htmlMsg, okLabel = "Conferma", okKind = "primary") {
+  return new Promise((resolve) => {
+    const backdrop = document.getElementById("modal");
+    document.getElementById("modal-title").textContent = title;
+    document.getElementById("modal-msg").innerHTML = htmlMsg;
+    const okBtn = document.getElementById("modal-ok");
+    const cancelBtn = document.getElementById("modal-cancel");
+    okBtn.textContent = okLabel;
+    okBtn.className = "btn " + okKind;
+    backdrop.classList.add("show");
+    okBtn.focus();
+
+    function cleanup(result) {
+      backdrop.classList.remove("show");
+      okBtn.removeEventListener("click", onOk);
+      cancelBtn.removeEventListener("click", onCancel);
+      backdrop.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey);
+      resolve(result);
+    }
+    function onOk() { cleanup(true); }
+    function onCancel() { cleanup(false); }
+    function onBackdrop(e) { if (e.target === backdrop) cleanup(false); }
+    function onKey(e) {
+      if (e.key === "Escape") cleanup(false);
+      if (e.key === "Enter") { e.preventDefault(); cleanup(true); }
+    }
+    okBtn.addEventListener("click", onOk);
+    cancelBtn.addEventListener("click", onCancel);
+    backdrop.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey);
+  });
+}
+
+load();
+loadChatConv();
+</script>
+</body>
+</html>

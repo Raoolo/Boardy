@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 INDEX = ROOT / "web" / "index.html"
 LIBRARY = ROOT / "web" / "library.html"
 SLEEVES = ROOT / "web" / "sleeves.html"
+WISHLIST = ROOT / "web" / "wishlist.html"
 RULEBOOKS_DIR = ROOT / "rulebooks"
 RULEBOOKS_DIR.mkdir(exist_ok=True)
 STATIC_DIR = ROOT / "web" / "static"
@@ -95,9 +96,15 @@ def delete_conversation(conv_id: int) -> dict:
 
 @app.get("/games/names")
 def games_names() -> list[str]:
-    """Names only — for autocomplete dropdowns in the UI."""
+    """Names only — for autocomplete dropdowns in the UI.
+
+    Owned-only: rulebook upload is the main consumer, and wishlist items
+    don't have rulebooks indexed (you don't own them yet).
+    """
     with get_conn() as c:
-        return [r["name"] for r in c.execute("SELECT name FROM games ORDER BY name")]
+        return [r["name"] for r in c.execute(
+            "SELECT name FROM games WHERE status='owned' ORDER BY name"
+        )]
 
 
 @app.get("/library")
@@ -107,7 +114,10 @@ def library_page() -> FileResponse:
 
 @app.get("/library/data")
 def library_data() -> dict:
-    """All games with their dim arrays + the universe of categories/mechanics for filter dropdowns."""
+    """All OWNED games with their dim arrays + the universe of categories/mechanics for filter dropdowns.
+
+    Wishlist items are intentionally excluded — they live on /wishlist.
+    """
     with get_conn() as c:
         games = []
         rows = c.execute("""
@@ -116,7 +126,7 @@ def library_data() -> dict:
                    duration_min, duration_min_min, duration_max_min,
                    complexity_label, complexity_weight, bgg_rating,
                    thumbnail_url, sleeve_status
-            FROM games ORDER BY name
+            FROM games WHERE status='owned' ORDER BY name
         """).fetchall()
         for r in rows:
             gid = r["id"]
@@ -379,6 +389,8 @@ def sleeves_data() -> dict:
     """
     summary = tools_mod.sleeve_summary()["items"]
     inventory = tools_mod.list_inventory()["items"]
+    wishlist_preview = tools_mod.sleeve_summary_wishlist()["items"]
+    ready_payload = tools_mod.games_ready_to_sleeve()
 
     def _label(w: float, h: float) -> str:
         # 63.5 → "63.5", 88 → "88" (drop trailing .0). Keeps display compact.
@@ -396,6 +408,15 @@ def sleeves_data() -> dict:
         {**r, "size": _label(r["width_mm"], r["height_mm"])}
         for r in inventory
     ]
+    # Decorate wishlist preview rows with the same `size` label format + an
+    # `already_covered` flag (true if the user has any inventory for this
+    # size already — helps surface "this size you don't even have yet").
+    inv_sizes = {(r["width_mm"], r["height_mm"]) for r in inventory if r["count_owned"] > 0}
+    wishlist_decorated = [
+        {**r, "size": _label(r["width_mm"], r["height_mm"]),
+         "already_covered": (r["width_mm"], r["height_mm"]) in inv_sizes}
+        for r in wishlist_preview
+    ]
 
     total_owned = sum(r["count_owned"] for r in inventory)
     total_to_buy = sum(r["to_buy"] for r in summary_decorated)
@@ -407,10 +428,14 @@ def sleeves_data() -> dict:
             "total_to_buy": total_to_buy,
             "sizes_total": len(summary_decorated),
             "sizes_covered": sizes_covered,
+            "wishlist_sleeves_total": sum(r["needed"] for r in wishlist_decorated),
+            "ready_count": ready_payload["count_ready"],
         },
         "to_buy": to_buy,
         "summary_all": summary_decorated,
         "inventory": inv_with_id,
+        "wishlist_preview": wishlist_decorated,
+        "ready_to_sleeve": ready_payload,
     }
 
 
@@ -455,6 +480,119 @@ def sleeves_inventory_upsert(req: InventoryUpsertRequest) -> dict:
         count_owned=req.count_owned, brand=req.brand,
         _source="web:sleeves",
     )
+
+
+# ── Wishlist ─────────────────────────────────────────────────────────────────
+
+@app.get("/wishlist")
+def wishlist_page() -> FileResponse:
+    return FileResponse(WISHLIST)
+
+
+@app.get("/wishlist/data")
+def wishlist_data() -> dict:
+    """All wishlist rows with dim arrays. Pre-sorted by priority."""
+    with get_conn() as c:
+        rows = c.execute("""
+            SELECT id, name, bgg_id, year_published,
+                   players_min, players_max, players_best,
+                   duration_min, duration_min_min, duration_max_min,
+                   complexity_label, complexity_weight, bgg_rating,
+                   thumbnail_url, description,
+                   priority, notes_wishlist, target_price,
+                   created_at
+            FROM games WHERE status='wishlist'
+            ORDER BY CASE priority
+              WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END,
+              name
+        """).fetchall()
+        items = []
+        for r in rows:
+            gid = r["id"]
+            cats = [x["name"] for x in c.execute(
+                "SELECT d.name FROM categories d JOIN game_categories b "
+                "ON b.category_id=d.id WHERE b.game_id=? ORDER BY d.name",
+                (gid,)).fetchall()]
+            mechs = [x["name"] for x in c.execute(
+                "SELECT d.name FROM mechanics d JOIN game_mechanics b "
+                "ON b.mechanic_id=d.id WHERE b.game_id=? ORDER BY d.name",
+                (gid,)).fetchall()]
+            items.append({**dict(r), "categories": cats, "mechanics": mechs})
+    counts = {"high": 0, "medium": 0, "low": 0, "none": 0}
+    for it in items:
+        key = it["priority"] if it["priority"] in counts else "none"
+        counts[key] += 1
+    return {"items": items, "counts": counts}
+
+
+class WishlistAddRequest(BaseModel):
+    name: str
+    priority: str | None = None
+    notes_wishlist: str | None = None
+    target_price: float | None = None
+
+
+@app.post("/wishlist/add")
+def wishlist_add(req: WishlistAddRequest) -> dict:
+    """Minimal add path from the page form. No BGG enrichment here — that flow
+    goes through chat. The UI is for quick-capture; the chat is for the full
+    confirm-then-add ritual."""
+    result = tools_mod.add_to_wishlist(
+        name=req.name, priority=req.priority,
+        notes_wishlist=req.notes_wishlist, target_price=req.target_price,
+        _source="web:wishlist",
+    )
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return result
+
+
+class WishlistUpdateRequest(BaseModel):
+    name: str
+    priority: str | None = None
+    notes_wishlist: str | None = None
+    target_price: float | None = None
+
+
+@app.post("/wishlist/update")
+def wishlist_update(req: WishlistUpdateRequest) -> dict:
+    result = tools_mod.update_wishlist(
+        name=req.name, priority=req.priority,
+        notes_wishlist=req.notes_wishlist, target_price=req.target_price,
+        _source="web:wishlist",
+    )
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return result
+
+
+class WishlistBuyRequest(BaseModel):
+    name: str
+    sleeve_status: str = "unknown"
+
+
+@app.post("/wishlist/buy")
+def wishlist_buy(req: WishlistBuyRequest) -> dict:
+    """Promote wishlist → owned. Returns the updated row."""
+    result = tools_mod.mark_as_owned(
+        name=req.name, sleeve_status=req.sleeve_status,
+        _source="web:wishlist",
+    )
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return result
+
+
+class WishlistRemoveRequest(BaseModel):
+    name: str
+
+
+@app.post("/wishlist/remove")
+def wishlist_remove(req: WishlistRemoveRequest) -> dict:
+    result = tools_mod.remove_from_wishlist(name=req.name, _source="web:wishlist")
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return result
 
 
 @app.post("/rulebooks/upload")
