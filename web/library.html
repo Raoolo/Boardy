@@ -558,15 +558,24 @@ function fmtSleeve(g) {
 // Picked so default sort surfaces "what still needs work".
 const SLEEVE_SORT_RANK = { to_sleeve: 0, unknown: 1, sleeved: 2, na: 3 };
 
+// Slug interno (es. "gestione-risorse") -> label leggibile ("Gestione risorse").
+// Lo storage in DB resta lo slug per matching deterministico; la prettifica e'
+// pura presentation. Convenzione italiana: maiuscola solo sulla prima lettera.
+function prettifyTag(t) {
+  if (!t) return "";
+  const s = String(t).replace(/-/g, " ");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function fmtTags(arr) {
   if (!arr || !arr.length) return `<span class="muted">—</span>`;
   // Show first TAG_PREVIEW inline; remaining are hidden behind a "+N altre" chip
   // that toggles them in place. Click handler is wired via event delegation.
   const head = arr.slice(0, TAG_PREVIEW);
   const tail = arr.slice(TAG_PREVIEW);
-  const headHtml = head.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
+  const headHtml = head.map(t => `<span class="tag">${escapeHtml(prettifyTag(t))}</span>`).join("");
   if (!tail.length) return `<div class="tags">${headHtml}</div>`;
-  const tailHtml = tail.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
+  const tailHtml = tail.map(t => `<span class="tag">${escapeHtml(prettifyTag(t))}</span>`).join("");
   return `<div class="tags">
     ${headHtml}
     <span class="tags-extra hidden">${tailHtml}</span>
@@ -729,7 +738,7 @@ function renderGridCards() {
           ${fmtSleeve(g)}
         </div>
         ${(g.friendly_tags && g.friendly_tags.length)
-          ? `<div class="tags">${g.friendly_tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>`
+          ? `<div class="tags">${g.friendly_tags.map(t => `<span class="tag">${escapeHtml(prettifyTag(t))}</span>`).join("")}</div>`
           : ""}
       </div>
     </div>
@@ -807,10 +816,11 @@ function buildMultiSelect(elId, key, options) {
   const clearBtn = root.querySelector(".ms-clear");
   const label = root.dataset.label;
 
+  // value stays the raw slug for matching; only the visible span is prettified.
   optsBox.innerHTML = options.map(o => `
     <label class="ms-option">
       <input type="checkbox" value="${escapeHtml(o)}" />
-      <span>${escapeHtml(o)}</span>
+      <span>${escapeHtml(prettifyTag(o))}</span>
     </label>
   `).join("");
 
@@ -820,7 +830,7 @@ function buildMultiSelect(elId, key, options) {
       trigger.textContent = `${label} (qualsiasi)`;
       trigger.classList.remove("has-value");
     } else if (n === 1) {
-      trigger.textContent = state.selected[key][0];
+      trigger.textContent = prettifyTag(state.selected[key][0]);
       trigger.classList.add("has-value");
     } else {
       trigger.textContent = `${label}: ${n} selezionate`;
@@ -974,7 +984,7 @@ function syncMultiSelect(elId, key) {
     trigger.textContent = `${label} (qualsiasi)`;
     trigger.classList.remove("has-value");
   } else if (arr.length === 1) {
-    trigger.textContent = arr[0];
+    trigger.textContent = prettifyTag(arr[0]);
     trigger.classList.add("has-value");
   } else {
     trigger.textContent = `${label}: ${arr.length} selezionate`;
