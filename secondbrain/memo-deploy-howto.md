@@ -1,8 +1,10 @@
 # Boardy — guida operativa Docker + git (per me futuro)
 
-Reference rapido per quando ho dimenticato la sequenza. Documentazione *esecutiva*, non concettuale — per il "perché" leggi `LEARNINGS.md`.
+Reference rapido per quando ho dimenticato la sequenza. Documentazione *esecutiva*, non concettuale — per il "perché" leggi `../docs/LEARNINGS.md`.
 
 > 💡 **Se sei confuso sul mental model** (cosa è un container, dove vive il DB, cosa rompe cosa) leggi prima `memo-deploy-caveman.md` — analogie e esempi di vita reale. Poi torna qui per i comandi esatti.
+
+> ⚠️ **Da maggio 2026**: i file Docker vivono in `deploy/`, non più in root. Tutti i comandi `docker compose …` sotto presuppongono che tu abbia esportato `COMPOSE_FILE=deploy/docker-compose.yml` nella sessione corrente (vedi setup iniziale). Senza, devi passare `-f deploy/docker-compose.yml` esplicito ogni volta.
 
 ---
 
@@ -26,6 +28,10 @@ sudo usermod -aG docker $USER          # poi logout/login per applicare
 git clone https://github.com/Raoolo/Boardy.git ~/boardy
 cd ~/boardy
 
+# 2.5. comodità: esporta COMPOSE_FILE così non devi passare -f ogni volta
+echo 'export COMPOSE_FILE=deploy/docker-compose.yml' >> ~/.bashrc
+source ~/.bashrc
+
 # 3. config
 cp .env.example .env
 nano .env                              # incolla le chiavi: ANTHROPIC, TAVILY, BGG, DEEPSEEK (opzionale)
@@ -35,7 +41,7 @@ nano .env                              # incolla le chiavi: ANTHROPIC, TAVILY, B
 #    Public Hostname: boardy.<dominio>.tld → http://boardy:8765
 
 # 5. trasferisci il DB esistente (oppure salta e re-importa via ETL)
-scp /path/to/local/boardy.db user@server:~/boardy-init.db
+scp /path/to/local/data/boardy.db user@server:~/boardy-init.db
 docker volume create boardy_boardy_db                    # se non esiste già
 docker run --rm -v boardy_boardy_db:/data -v ~:/host alpine \
   cp /host/boardy-init.db /data/boardy.db

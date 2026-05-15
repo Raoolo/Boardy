@@ -1,19 +1,23 @@
 # Boardy — local & self-host stack.
 #
+# This compose file lives in deploy/ — all paths (build context, bind mounts,
+# env_file) are RELATIVE TO THIS FILE, so `..` = repo root. Pinning the
+# project name with `name: boardy` (top-level) keeps the volume always named
+# `boardy_boardy_db` regardless of where compose is invoked from.
+#
 # Two services with distinct activation modes:
 #
-#   docker compose up -d                       → only boardy, on localhost:8765
-#                                                (dev / single-machine LAN)
+#   docker compose -f deploy/docker-compose.yml up -d
+#       → only boardy, on localhost:8765 (dev / single-machine LAN)
 #
-#   docker compose --profile tunnel up -d      → boardy + cloudflared
-#                                                (server-side deploy via CF
-#                                                Tunnel; requires CF_TUNNEL_TOKEN
-#                                                in .env)
+#   docker compose -f deploy/docker-compose.yml --profile tunnel up -d
+#       → boardy + cloudflared (server-side deploy via CF Tunnel; requires
+#         CF_TUNNEL_TOKEN in .env)
 #
-# Bind-mounting code (app/, etl/, web/) is intentional: the typical update
-# loop on the server is `git pull && docker compose restart boardy`, which
-# takes a few seconds vs. a full image rebuild. Image rebuilds are needed
-# ONLY when pyproject.toml / uv.lock change (i.e. dependency churn).
+# Bind-mounting code (app/, etl/, web/) is intentional: typical update loop
+# on the server is `git pull && docker compose -f deploy/docker-compose.yml
+# restart boardy`, which takes a few seconds vs. a full image rebuild. Image
+# rebuilds are needed ONLY when pyproject.toml / uv.lock change.
 #
 # State persistence:
 #   - boardy.db is in a named volume (`boardy_db`). Survives container/image
@@ -22,26 +26,30 @@
 #     on the host filesystem than inside a volume).
 #   - HF cache is baked in the image (see Dockerfile) — no volume needed.
 
+name: boardy
+
 services:
   boardy:
-    build: .
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
     container_name: boardy
     restart: unless-stopped
-    env_file: .env
+    env_file: ../.env
     # Override BOARDY_DB so the app writes to the volume path, not the
     # repo-relative default. The app.db module reads this if set, otherwise
-    # falls back to ./boardy.db (legacy behavior preserved for local dev).
+    # falls back to ./data/boardy.db (local-dev path).
     environment:
       BOARDY_DB: /data/boardy.db
     volumes:
       # Code: bind-mount for hot-update via `git pull && restart boardy`.
       # Read-only so a container-side bug can't corrupt the host repo.
-      - ./app:/app/app:ro
-      - ./etl:/app/etl:ro
-      - ./web:/app/web:ro
+      - ../app:/app/app:ro
+      - ../etl:/app/etl:ro
+      - ../web:/app/web:ro
       # State: persistent across rebuilds.
       - boardy_db:/data
-      - ./rulebooks:/app/rulebooks
+      - ../rulebooks:/app/rulebooks
     # Local-only port binding. With the tunnel profile, traffic comes via
     # the cloudflared container over the internal network — 8765 stays
     # unreachable from the public internet.

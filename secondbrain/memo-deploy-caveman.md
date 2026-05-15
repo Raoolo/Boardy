@@ -106,4 +106,4 @@ L'**unico** comando che cancella il DB è:
 ---
 
 👉 **Per i comandi esatti** (con flags, sintassi, troubleshooting per sintomo): salta a `memo-deploy-howto.md`.
-👉 **Per il "perché" architetturale** di una scelta: `LEARNINGS.md`.
+👉 **Per il "perché" architetturale** di una scelta: `../docs/LEARNINGS.md`.

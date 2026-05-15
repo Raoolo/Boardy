@@ -26,8 +26,10 @@ No test suite — validate by smoke-testing a tool (`uv run python -c "from app.
 app/         FastAPI app + chat loop + tools (read code first)
 etl/         One-shot scripts: Excel import, BGG backfill, embeddings
 web/         Static HTML pages (index/library/sleeves/wishlist), no build step
+deploy/      Dockerfile + docker-compose.yml (compose pins `name: boardy` so volumes stay stable)
+docs/        LEARNINGS.md (tribal knowledge) + TODO.md (prioritized backlog)
 rulebooks/   PDF rulebooks (gitignored — copyright + bulky)
-data/        Source data + DB backups (Excel + *.db.bak; runtime DB stays at repo root)
+data/        Source data + runtime DB + backups (Excel, boardy.db, *.db.bak)
 archive/     Legacy code from abandoned approaches (e.g. Ollama exploration). Read-only history.
 secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO NOT write without being asked.
 .claude/     Claude Code's own state (auto-managed)
@@ -42,8 +44,8 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - `app/llm.py` — `Provider` ABC with three impls: `AnthropicProvider` (`claude-sonnet-4-6`), `DeepSeekProvider` (`deepseek-chat`, OpenAI-compatible — **current production default per `.env`**, ~10× cheaper than Sonnet), `OllamaProvider` (local, archived — see memory). Selection per-request via `LLM_PROVIDER`. Web search is client-side (Tavily tool in `app/tools.py`) — no provider-specific search anymore. `/library/filter` is hardcoded to `deepseek-chat` (override via `LIBRARY_FILTER_MODEL`).
 - `app/schema.py` — star schema DDL + idempotent v1→v7 migration on every boot (latest: `users` table for owner login).
 - `app/audit.py` — every write to `games`/`sleeve_requirements`/`sleeve_inventory` logs to `changes`.
-- `app/conversations.py` — server-side conversation persistence + `_title_from_history` (currently truncates first user msg; see TODO).
-- `app/db.py` — SQLite connection. Reads env `BOARDY_DB` (Docker volume path); falls back to `<repo>/boardy.db`.
+- `app/conversations.py` — server-side conversation persistence + `_title_from_history` (DeepSeek `deepseek-chat`, T=0, ~$0.0001/conv; first save only, then COALESCE-sticky; truncation fallback if no `DEEPSEEK_API_KEY` or the call fails).
+- `app/db.py` — SQLite connection. Reads env `BOARDY_DB` (Docker volume path); falls back to `<repo>/data/boardy.db`.
 - `app/games_semantic.py` — hybrid SQL+cosine over `games.description_embedding`. Reuses `_model_lazy()` from `rulebooks.py` (single 280MB load).
 - `app/rulebooks.py` — pypdf chunking + e5 embeddings + brute-force cosine.
 - `web/index.html` — chat UI (single-file vanilla JS + `marked.js`). No build step.
@@ -55,8 +57,8 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 
 ## Companion docs (read before non-trivial work)
 
-- `LEARNINGS.md` — **read first**. Tribal knowledge: gotchas, decisions, user preferences accumulated across sessions.
-- `TODO.md` — actionable backlog with priorities. Consult when the user asks "what's next?".
+- `docs/LEARNINGS.md` — **read first**. Tribal knowledge: gotchas, decisions, user preferences accumulated across sessions.
+- `docs/TODO.md` — actionable backlog with priorities. Consult when the user asks "what's next?".
 - `secondbrain/memo-boardy-future.md` — long-form rationale behind TODO items. Open when a TODO needs context.
 - `secondbrain/memo-deploy-howto.md` — exact Docker/git commands for self-host (setup, update workflow, troubleshooting table).
 - `secondbrain/memo-deploy-caveman.md` — mental model of the deploy (restaurant analogy + real-life examples). Read first when re-orienting after a break.
@@ -85,7 +87,7 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - `LLM_MODEL`, `DEEPSEEK_BASE_URL`, `OLLAMA_BASE_URL` — optional overrides.
 - `LIBRARY_FILTER_MODEL` — override the DeepSeek model used by `/library/filter` (default `deepseek-chat`).
 - `BGG_API_TOKEN` — required since 2026-04 (BGG XML API is Cloudflare-gated, both v1 and v2). Public-page scraping via web_search was tried and failed (JS-rendered widgets — see LEARNINGS).
-- `BOARDY_DB` — optional, overrides DB path. Used by `docker-compose.yml` to point at `/data/boardy.db` (named volume). Defaults to `<repo>/boardy.db`.
+- `BOARDY_DB` — optional, overrides DB path. Used by `docker-compose.yml` to point at `/data/boardy.db` (named volume). Defaults to `<repo>/data/boardy.db`.
 - `BOARDY_SESSION_SECRET` — **required** in production. Chiave per firmare il cookie di sessione owner. Genera con `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Senza, l'app crasha al primo `/auth/login`. Ruotarla invalida tutti i cookie esistenti (logout globale).
 - `BOARDY_COOKIE_SECURE` — `1` in produzione HTTPS (cookie marcato `Secure`, browser rifiuta su HTTP); lascia unset in dev locale (`http://localhost`).
 - `CF_TUNNEL_TOKEN` — Cloudflare Tunnel token. Required ONLY for `docker compose --profile tunnel` (self-host deploy). Generated by the tunnel owner in the CF dashboard (Zero Trust → Networks → Tunnels → Create → token).
@@ -93,14 +95,16 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 
 ## Deploy / Self-host (Docker)
 
-Two modes from one `docker-compose.yml`:
+Docker files live in `deploy/`. The compose file pins `name: boardy` so the volume is always `boardy_boardy_db` regardless of where you invoke from. Two modes from one `deploy/docker-compose.yml`:
 
 ```bash
-docker compose up -d --build              # local: boardy on http://127.0.0.1:8765
-docker compose --profile tunnel up -d     # server: boardy + cloudflared, public via CF Tunnel
+docker compose -f deploy/docker-compose.yml up -d --build              # local: boardy on http://127.0.0.1:8765
+docker compose -f deploy/docker-compose.yml --profile tunnel up -d     # server: boardy + cloudflared, public via CF Tunnel
 ```
 
-**Update workflow** on the server: `git pull && docker compose restart boardy` — Python code and HTML are bind-mounted, no rebuild. Rebuild image (`up -d --build`) ONLY when `pyproject.toml` / `uv.lock` change.
+Tip: export `COMPOSE_FILE=deploy/docker-compose.yml` in the server shell to drop the `-f` flag from subsequent commands.
+
+**Update workflow** on the server: `git pull && docker compose -f deploy/docker-compose.yml restart boardy` — Python code and HTML are bind-mounted, no rebuild. Rebuild image (`up -d --build`) ONLY when `pyproject.toml` / `uv.lock` change.
 
 **State**: `boardy.db` lives in the `boardy_db` named volume (survives image rebuilds); `rulebooks/` is bind-mounted from host; `.env` is bind-mounted read-only. The e5 model is baked into the image.
 
@@ -108,6 +112,6 @@ docker compose --profile tunnel up -d     # server: boardy + cloudflared, public
 1. Cloudflare dashboard → Zero Trust → Networks → Tunnels → Create a tunnel → copy the **token**.
 2. In Public Hostname tab: add `boardy.<your-domain>.tld` → service `http://boardy:8765`. (`boardy` here is the container hostname inside the Docker network.)
 3. Put `CF_TUNNEL_TOKEN=...` in `.env` on the server.
-4. `docker compose --profile tunnel up -d`. The tunnel comes up, hostname resolves, TLS handled by Cloudflare. No port forwarding needed on the host.
+4. `docker compose -f deploy/docker-compose.yml --profile tunnel up -d`. The tunnel comes up, hostname resolves, TLS handled by Cloudflare. No port forwarding needed on the host.
 
 The Docker image bakes the e5 model (~1.5GB total). First build ~3-5 min, subsequent rebuilds (deps unchanged) under 1 min thanks to layer cache.

@@ -1,6 +1,6 @@
 """Backfill BGG metadata using the official XML API (v2).
 
-Three phases — see CLAUDE.md / LEARNINGS.md for context:
+Three phases — see CLAUDE.md / docs/LEARNINGS.md for context:
 
   Phase 1 (fill):    for every game with a known bgg_id, GET thing?id=X&stats=1
                      and patch missing fields. €0, deterministic, idempotent.

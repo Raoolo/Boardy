@@ -24,7 +24,7 @@ __pycache__
 *.sqlite
 *.sqlite3
 *.bak
-boardy.db
+data/
 
 # Secrets — never bake these into a layer
 .env

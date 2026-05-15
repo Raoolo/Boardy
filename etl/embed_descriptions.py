@@ -9,7 +9,7 @@ Usage:
     uv run python etl/embed_descriptions.py --force
 
 Windows note: cp1252 stdout chokes on the e5 progress bar's box-drawing
-characters; we reconfigure to UTF-8 early. See LEARNINGS.md.
+characters; we reconfigure to UTF-8 early. See docs/LEARNINGS.md.
 """
 from __future__ import annotations
 

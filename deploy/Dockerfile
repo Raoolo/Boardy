@@ -1,5 +1,10 @@
 # Boardy — multi-stage Dockerfile.
 #
+# Lives in deploy/, but `deploy/docker-compose.yml` sets the build context to
+# the REPO ROOT (`context: ..`) — so all COPY paths below are relative to the
+# project root, not to deploy/. Lets us COPY pyproject.toml/uv.lock without
+# any `../` gymnastics.
+#
 # Stage 1 (builder): full Python image, installs uv, syncs deps to a project
 # venv, and pre-downloads the multilingual-e5-base sentence-transformer model
 # (~280MB). Pre-caching the model in the image avoids a cold 30-60s download
@@ -11,7 +16,8 @@
 #
 # What's NOT in the image (mounted at runtime as volumes / files):
 #   - app/ etl/ web/      (bind-mounted, so `git pull && docker compose
-#                         restart boardy` updates Python without rebuild)
+#                         -f deploy/docker-compose.yml restart boardy`
+#                         updates Python without rebuild)
 #   - boardy.db           (named volume, persists across container rebuilds)
 #   - rulebooks/          (named volume, persists PDF binaries)
 #   - .env                (mounted read-only, contains the API keys)

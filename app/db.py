@@ -5,10 +5,10 @@ import os
 import sqlite3
 from pathlib import Path
 
-# Default: repo-root/boardy.db (legacy local-dev location).
+# Default: <repo>/data/boardy.db (local-dev location).
 # Override via BOARDY_DB env var to point at a persistent volume in Docker
 # (`/data/boardy.db`) — set in docker-compose.yml.
-_DEFAULT_DB = Path(__file__).resolve().parent.parent / "boardy.db"
+_DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "boardy.db"
 DB_PATH = Path(os.environ.get("BOARDY_DB") or _DEFAULT_DB)
 
 

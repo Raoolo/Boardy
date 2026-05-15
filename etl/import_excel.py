@@ -30,7 +30,7 @@ import openpyxl
 
 ROOT = Path(__file__).resolve().parent.parent
 EXCEL_PATH = ROOT / "data" / "ElencoGiochi.xlsx"
-DB_PATH = ROOT / "boardy.db"
+DB_PATH = ROOT / "data" / "boardy.db"
 UNPARSED_PATH = ROOT / "etl" / "unparsed.txt"
 SHEET_NAME = "Elenco Premium"
 HEADER_ROW = 3  # row 3 is the header; data starts at row 4

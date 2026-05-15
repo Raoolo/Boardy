@@ -128,7 +128,9 @@ etl/
 web/
   index.html      Single-file UI (HTML + CSS + JS inline)
 rulebooks/        Uploaded PDFs land here
-boardy.db         SQLite database (gitignored)
+data/
+  boardy.db       SQLite database (gitignored)
+  ElencoGiochi.xlsx  Source Excel for the ETL
 ```
 
 ## Design notes
@@ -144,7 +146,7 @@ boardy.db         SQLite database (gitignored)
 
 ## What's next
 
-See [`TODO.md`](TODO.md) for the prioritized backlog. Highlights:
+See [`docs/TODO.md`](docs/TODO.md) for the prioritized backlog. Highlights:
 
 - Library v2: thumbnail grid view as an alternative to the current dense table
 - Voice input via the Web Speech API (mic button next to "Invia")
