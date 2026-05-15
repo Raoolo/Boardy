@@ -176,10 +176,17 @@ def library_page() -> FileResponse:
 
 @app.get("/library/data")
 def library_data() -> dict:
-    """All OWNED games with their dim arrays + the universe of categories/mechanics for filter dropdowns.
+    """All OWNED games + the friendly_tags vocabulary for the filter dropdown.
 
     Wishlist items are intentionally excluded — they live on /wishlist.
+
+    `friendly_tags` is the user-facing tag set (LLM-generated, fixed vocab in
+    `app/friendly_tags.py`). Raw BGG `categories`/`mechanics` are still
+    available per-game for the semantic-search SQL pre-filter on the server
+    side, but the library UI now filters/displays on friendly_tags only.
     """
+    import json
+    from .friendly_tags import VOCABULARY
     with get_conn() as c:
         games = []
         rows = c.execute("""
@@ -187,21 +194,17 @@ def library_data() -> dict:
                    players_min, players_max, players_best,
                    duration_min, duration_min_min, duration_max_min,
                    complexity_label, complexity_weight, bgg_rating,
-                   thumbnail_url, sleeve_status
+                   thumbnail_url, sleeve_status, friendly_tags
             FROM games WHERE status='owned' ORDER BY name
         """).fetchall()
         for r in rows:
-            gid = r["id"]
-            cats = [x["name"] for x in c.execute(
-                "SELECT d.name FROM categories d JOIN game_categories b ON b.category_id=d.id WHERE b.game_id=? ORDER BY d.name",
-                (gid,)).fetchall()]
-            mechs = [x["name"] for x in c.execute(
-                "SELECT d.name FROM mechanics d JOIN game_mechanics b ON b.mechanic_id=d.id WHERE b.game_id=? ORDER BY d.name",
-                (gid,)).fetchall()]
-            games.append({**dict(r), "categories": cats, "mechanics": mechs})
-        all_categories = [r["name"] for r in c.execute("SELECT name FROM categories ORDER BY name")]
-        all_mechanics  = [r["name"] for r in c.execute("SELECT name FROM mechanics ORDER BY name")]
-    return {"games": games, "categories": all_categories, "mechanics": all_mechanics}
+            d = dict(r)
+            try:
+                d["friendly_tags"] = json.loads(d["friendly_tags"]) if d["friendly_tags"] else []
+            except (TypeError, json.JSONDecodeError):
+                d["friendly_tags"] = []
+            games.append(d)
+    return {"games": games, "friendly_vocabulary": list(VOCABULARY)}
 
 
 # ── Smart filter (natural-language → filter spec) ────────────────────────────
@@ -253,15 +256,10 @@ _FILTER_TOOL_SCHEMA = {
                     "type": "string",
                     "enum": ["sleeved", "to_sleeve", "na", "unknown"],
                 },
-                "categories": {
+                "friendly_tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Categories to filter by (OR semantics). MUST be exact strings from the list given in the system prompt.",
-                },
-                "mechanics": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Mechanics to filter by (OR semantics). MUST be exact strings from the list given in the system prompt.",
+                    "description": "User-friendly tags to filter by (OR semantics). MUST be exact strings from the fixed vocabulary given in the system prompt.",
                 },
                 "name_contains": {
                     "type": "string",
@@ -282,28 +280,30 @@ _FILTER_TOOL_SCHEMA = {
 }
 
 
-def _build_filter_system_prompt(categories: list[str], mechanics: list[str]) -> str:
-    """System prompt for the smart-filter LLM. Embeds the universe of valid
-    category/mechanic strings so the model can't hallucinate values."""
+def _build_filter_system_prompt(friendly_vocab: list[str]) -> str:
+    """System prompt for the smart-filter LLM. Embeds the friendly_tags
+    vocabulary so the model can only return tags in the fixed set."""
     return (
         "Sei l'assistente di filtro della libreria giochi di Boardy.\n"
         "L'utente ti chiede di filtrare la sua collezione e tu DEVI chiamare il tool `apply_filter` "
         "ESATTAMENTE UNA VOLTA con i parametri appropriati.\n\n"
         "REGOLE:\n"
         "- Se l'utente menziona somiglianza ('come Catan', 'simile a X', 'tipo Wingspan') o una vibe "
-        "non catturabile da filtri strutturali ('rilassante', 'epico', 'tranquillo', 'profondo'), "
-        "USA `semantic_query` con la frase originale dell'utente o una sua riformulazione.\n"
-        "- Per filtri puramente strutturali ('da 2', 'facili', 'sotto i 30 minuti', 'da imbustare'), "
-        "riempi i campi strutturati e NON usare `semantic_query`.\n"
+        "complessa non catturabile da un singolo tag ('epico', 'leggero ma profondo', 'tipo wargame ma rapido'), "
+        "USA `semantic_query` con la frase originale dell'utente.\n"
+        "- Per filtri strutturati ('da 2', 'facili', 'sotto i 30 minuti', 'da imbustare', "
+        "'rilassanti', 'party', 'cooperativi'), riempi i campi strutturati e NON usare `semantic_query`.\n"
         "- Mappa la complessità: facile/leggero=tier 1-2, medio=3, complesso/pesante/esperto=4-5.\n"
-        "- `categories` e `mechanics` DEVONO essere voci esatte tra quelle disponibili sotto. "
-        "Se la categoria richiesta non c'è ESATTAMENTE, lascia vuoto e spiegalo nel message.\n"
+        "- `friendly_tags` DEVE contenere solo voci esatte dal vocabolario qui sotto. "
+        "Esempi di mapping: 'rilassanti'→`rilassante`, 'in coop'→`cooperativo`, 'da famiglia'→`per-famiglie`, "
+        "'puzzle'→`puzzle`, 'tipo party'→`party`. "
+        "Se la richiesta dell'utente non corrisponde ESATTAMENTE a un tag, lascia `friendly_tags` vuoto "
+        "e (se sensato) usa `semantic_query`.\n"
         "- Se l'utente dice 'azzera', 'togli i filtri', 'pulisci', metti `reset: true`.\n"
         "- Risposta `message` SEMPRE in italiano, 1-2 frasi brevi, descrive cosa hai filtrato.\n"
         "- Se l'utente chiede qualcosa che non puoi tradurre in filtri (es. 'quanti giochi ho?'), "
         "rispondi nel `message` senza impostare alcun filtro.\n\n"
-        f"Categorie disponibili (usa SOLO queste): {', '.join(categories)}\n\n"
-        f"Meccaniche disponibili (usa SOLO queste): {', '.join(mechanics)}\n"
+        f"Vocabolario `friendly_tags` (usa SOLO questi): {', '.join(friendly_vocab)}\n"
     )
 
 
@@ -324,15 +324,10 @@ def library_filter(req: FilterRequest) -> dict:
     import json
     import os
     from openai import OpenAI
+    from .friendly_tags import VOCABULARY as FRIENDLY_VOCAB
 
     if not req.query.strip():
         raise HTTPException(400, "empty query")
-
-    # Universe of valid category/mechanic names — pinned into the prompt so the
-    # model can't return strings outside this set.
-    with get_conn() as c:
-        categories = [r["name"] for r in c.execute("SELECT name FROM categories ORDER BY name")]
-        mechanics = [r["name"] for r in c.execute("SELECT name FROM mechanics ORDER BY name")]
 
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
@@ -346,7 +341,7 @@ def library_filter(req: FilterRequest) -> dict:
     resp = client.chat.completions.create(
         model=os.environ.get("LIBRARY_FILTER_MODEL", "deepseek-chat"),
         messages=[
-            {"role": "system", "content": _build_filter_system_prompt(categories, mechanics)},
+            {"role": "system", "content": _build_filter_system_prompt(list(FRIENDLY_VOCAB))},
             {"role": "user", "content": req.query},
         ],
         tools=[_FILTER_TOOL_SCHEMA],
@@ -372,12 +367,10 @@ def library_filter(req: FilterRequest) -> dict:
     if args.get("reset"):
         return {"filters": {}, "semantic_ids": None, "message": message, "reset": True}
 
-    # Sanitize categories/mechanics against the known universe — extra safety
-    # in case the model returns near-misses despite the schema constraint.
-    cats_set = set(categories)
-    mechs_set = set(mechanics)
-    valid_cats = [c for c in (args.get("categories") or []) if c in cats_set]
-    valid_mechs = [m for m in (args.get("mechanics") or []) if m in mechs_set]
+    # Sanitize friendly_tags against the fixed vocabulary — defense in depth
+    # in case the model invents a tag despite the schema constraint.
+    vocab_set = set(FRIENDLY_VOCAB)
+    valid_tags = [t for t in (args.get("friendly_tags") or []) if t in vocab_set]
 
     filters = {
         "players": args.get("players"),
@@ -385,13 +378,14 @@ def library_filter(req: FilterRequest) -> dict:
         "complexity_min_tier": args.get("complexity_min_tier"),
         "max_duration_min": args.get("max_duration_min"),
         "sleeve_status": args.get("sleeve_status"),
-        "categories": valid_cats,
-        "mechanics": valid_mechs,
+        "friendly_tags": valid_tags,
         "name_contains": args.get("name_contains"),
     }
 
     # Semantic path: the structured filters become SQL pre-filters on the
-    # candidate set, then cosine ranks the survivors.
+    # candidate set, then cosine ranks the survivors. We drop category/mechanic
+    # pre-filtering (the UI no longer exposes them) — the description
+    # embedding already captures genre, so this loses little.
     semantic_ids: list[int] | None = None
     sq = (args.get("semantic_query") or "").strip()
     if sq:
@@ -399,10 +393,6 @@ def library_filter(req: FilterRequest) -> dict:
                  if filters["complexity_max_tier"] else None)
         min_w = (_TIER_TO_MIN_WEIGHT.get(filters["complexity_min_tier"])
                  if filters["complexity_min_tier"] else None)
-        # search_semantic only accepts a single category/mechanic substring;
-        # pass the first to keep the SQL pre-filter sensible.
-        cat = valid_cats[0] if valid_cats else None
-        mech = valid_mechs[0] if valid_mechs else None
         # 'players=6' in the UI means "6+"; semantic search wants exact, so
         # only pass it through for 1–5.
         p = filters["players"] if filters["players"] in (1, 2, 3, 4, 5) else None
@@ -413,8 +403,6 @@ def library_filter(req: FilterRequest) -> dict:
             min_complexity_weight=min_w,
             max_duration_min=filters["max_duration_min"],
             sleeve_status=filters["sleeve_status"],
-            category_contains=cat,
-            mechanic_contains=mech,
             k=20,
         )
         semantic_ids = [r["id"] for r in results]

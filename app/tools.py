@@ -121,6 +121,22 @@ def _backfill_bgg_media(game_id: int) -> bool:
         return False
 
 
+def _backfill_friendly_tags(game_id: int) -> bool:
+    """Generate + persist friendly_tags for a game (best-effort, post-commit).
+
+    Pair to `_backfill_bgg_media`: same call sites (add_game, update_game,
+    add_to_wishlist, update_wishlist) so any BGG-enriched write produces
+    the user-friendly tags too. Swallows all errors; the write tool already
+    succeeded, so any LLM hiccup just leaves `friendly_tags` NULL for the
+    next batch run to pick up.
+    """
+    try:
+        from . import friendly_tags
+        return friendly_tags.backfill_one(game_id) is not None
+    except Exception:
+        return False
+
+
 def _upsert_dim(conn, dim_table: str, name: str) -> int:
     name = name.strip()
     if not name:
@@ -316,6 +332,7 @@ def add_game(
     # Backfill thumbnail/image via BGG XML API if we have a bgg_id but the
     # chat-driven enrichment didn't capture the image URLs.
     _backfill_bgg_media(gid)
+    _backfill_friendly_tags(gid)
     return {"ok": True, "id": gid, "name": name}
 
 
@@ -408,6 +425,7 @@ def update_game(
     # Backfill thumbnail/image via BGG XML API if missing (e.g. bgg_id was
     # just set but the chat didn't fetch the image fields).
     _backfill_bgg_media(gid)
+    _backfill_friendly_tags(gid)
     return result
 
 
@@ -1044,6 +1062,7 @@ def add_to_wishlist(
     # more than owned games because the /wishlist grid relies on the cover
     # image for visual recall ("which Brass was it again?").
     _backfill_bgg_media(gid)
+    _backfill_friendly_tags(gid)
     return {"ok": True, "id": gid, "name": name, "status": "wishlist",
             "priority": priority}
 
@@ -1154,6 +1173,7 @@ def update_wishlist(
         except Exception:
             pass
     _backfill_bgg_media(gid)
+    _backfill_friendly_tags(gid)
     return {"ok": True, "name": name, "updated": list(fields.keys()), "audit_rows": n_logged}
 
 

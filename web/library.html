@@ -156,8 +156,7 @@
   col.c-weight   { width: 150px; }
   col.c-rating   { width: 70px; }
   col.c-sleeve   { width: 140px; }
-  col.c-cats     { width: 18%; }
-  col.c-mechs    { width: auto; }
+  col.c-friendly { width: auto; }
   /* In fixed layout, cells ignore their content for sizing — long tag
      lists wrap inside the cell instead of widening it. */
   td .tags { max-width: 100%; }
@@ -426,16 +425,8 @@
     <option value="4">4 · Complesso</option>
     <option value="5">5 · Esperto</option>
   </select>
-  <div class="ms" id="ms-category" data-key="category" data-label="Categoria">
-    <button class="ms-trigger" type="button">Categoria (qualsiasi)</button>
-    <div class="ms-panel">
-      <input type="text" class="ms-search" placeholder="Cerca…" />
-      <div class="ms-options"></div>
-      <button type="button" class="ms-clear">Deseleziona tutto</button>
-    </div>
-  </div>
-  <div class="ms" id="ms-mechanic" data-key="mechanic" data-label="Meccanica">
-    <button class="ms-trigger" type="button">Meccanica (qualsiasi)</button>
+  <div class="ms" id="ms-friendly" data-key="friendly" data-label="Tag">
+    <button class="ms-trigger" type="button">Tag (qualsiasi)</button>
     <div class="ms-panel">
       <input type="text" class="ms-search" placeholder="Cerca…" />
       <div class="ms-options"></div>
@@ -472,8 +463,7 @@
       <col class="c-weight" />
       <col class="c-rating" />
       <col class="c-sleeve" />
-      <col class="c-cats" />
-      <col class="c-mechs" />
+      <col class="c-friendly" />
     </colgroup>
     <thead>
       <tr>
@@ -484,8 +474,7 @@
         <th data-sort="weight">Complessità</th>
         <th data-sort="rating" class="num">BGG</th>
         <th data-sort="sleeve">Buste</th>
-        <th>Categorie</th>
-        <th>Meccaniche</th>
+        <th>Tag</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -502,7 +491,7 @@ const state = {
   sortDir: 1, // 1 asc, -1 desc
   view: localStorage.getItem("library.view") || "table", // "table" | "grid"
   // Multi-select: arrays of selected option strings. Empty = no filter.
-  selected: { category: [], mechanic: [] },
+  selected: { friendly: [] },
   // Smart filter: when set, only games whose id is in this Set survive
   // applyFilters(). Populated by /library/filter when the LLM took the
   // semantic path. null = no semantic restriction.
@@ -617,8 +606,7 @@ function applyFilters() {
   const sleeve = document.getElementById("sleeve").value;
   const durationRaw = document.getElementById("duration").value;
   const maxDuration = durationRaw ? parseInt(durationRaw, 10) : null;
-  const selCats = state.selected.category;
-  const selMechs = state.selected.mechanic;
+  const selTags = state.selected.friendly;
 
   state.filtered = state.games.filter(g => {
     // Semantic filter takes precedence: only games returned by the LLM
@@ -644,13 +632,9 @@ function applyFilters() {
     }
     // Multi-select: OR semantics — game passes if it has at least one
     // of the selected tags. Empty selection = no filter.
-    if (selCats.length) {
-      const cats = g.categories || [];
-      if (!selCats.some(c => cats.includes(c))) return false;
-    }
-    if (selMechs.length) {
-      const mechs = g.mechanics || [];
-      if (!selMechs.some(m => mechs.includes(m))) return false;
+    if (selTags.length) {
+      const tags = g.friendly_tags || [];
+      if (!selTags.some(t => tags.includes(t))) return false;
     }
     if (sleeve && g.sleeve_status !== sleeve) return false;
     return true;
@@ -727,8 +711,7 @@ function renderTableRows() {
       <td>${fmtComplexity(g)}</td>
       <td class="num">${fmtRating(g)}</td>
       <td>${fmtSleeve(g)}</td>
-      <td>${fmtTags(g.categories)}</td>
-      <td>${fmtTags(g.mechanics)}</td>
+      <td>${fmtTags(g.friendly_tags)}</td>
     </tr>
   `).join("");
 }
@@ -745,6 +728,9 @@ function renderGridCards() {
           ${fmtComplexity(g)}
           ${fmtSleeve(g)}
         </div>
+        ${(g.friendly_tags && g.friendly_tags.length)
+          ? `<div class="tags">${g.friendly_tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>`
+          : ""}
       </div>
     </div>
   `).join("");
@@ -803,8 +789,7 @@ async function load() {
   const data = await r.json();
   state.games = data.games;
 
-  buildMultiSelect("ms-category", "category", data.categories);
-  buildMultiSelect("ms-mechanic", "mechanic", data.mechanics);
+  buildMultiSelect("ms-friendly", "friendly", data.friendly_vocabulary);
 
   applyFilters();
 }
@@ -964,13 +949,9 @@ function applySmartFilters(filters, semanticIds, query) {
   if (filters.name_contains) {
     document.getElementById("q").value = filters.name_contains;
   }
-  if (filters.categories && filters.categories.length) {
-    state.selected.category = [...filters.categories];
-    syncMultiSelect("ms-category", "category");
-  }
-  if (filters.mechanics && filters.mechanics.length) {
-    state.selected.mechanic = [...filters.mechanics];
-    syncMultiSelect("ms-mechanic", "mechanic");
+  if (filters.friendly_tags && filters.friendly_tags.length) {
+    state.selected.friendly = [...filters.friendly_tags];
+    syncMultiSelect("ms-friendly", "friendly");
   }
   if (semanticIds && semanticIds.length) {
     state.semanticIds = new Set(semanticIds);

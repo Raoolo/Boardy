@@ -297,6 +297,21 @@ def _migrate_v4_description_embedding(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE games ADD COLUMN description_skip_reason TEXT")
 
 
+def _migrate_v8_friendly_tags(conn: sqlite3.Connection) -> None:
+    """v8: add `games.friendly_tags` for user-friendly LLM-generated tags.
+
+    Stored as a JSON-encoded array of strings (e.g. `["rilassante","cooperativo"]`).
+    Vocabolario fisso in `app/friendly_tags.py` — il modello deve scegliere
+    SOLO da quella lista, niente vocabolario aperto (rompe la ricercabilita').
+    NULL = non ancora generato. `[]` = generato ma il modello non ha trovato
+    match validi (raro). No index: il filtraggio e' client-side (multi-select)
+    perche' il numero di righe e' piccolo (<200) e qualunque indice su una
+    LIKE su JSON non aiuta.
+    """
+    if not _has_column(conn, "games", "friendly_tags"):
+        conn.execute("ALTER TABLE games ADD COLUMN friendly_tags TEXT")
+
+
 def migrate() -> None:
     with get_conn() as conn:
         # If `games` doesn't exist at all, nothing to do — ETL will create it.
@@ -329,5 +344,8 @@ def migrate() -> None:
 
         # v7: users table for owner login.
         _migrate_v7_users(conn)
+
+        # v8: friendly_tags column on games.
+        _migrate_v8_friendly_tags(conn)
 
         conn.commit()

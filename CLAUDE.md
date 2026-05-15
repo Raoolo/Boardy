@@ -16,6 +16,7 @@ uv run python etl/backfill_v2.py phase1 | phase2 [--auto] | apply --gid N --bgg 
 uv run python etl/backfill_descriptions_tavily.py [--only NAME] [--dry-run]
 uv run python etl/backfill_descriptions_websearch.py [--only NAME] [--manual "text"] [--dry-run]
 uv run python etl/embed_descriptions.py [--force]
+uv run python etl/generate_friendly_tags.py [--force] [--only NAME] [--dry-run]
 ```
 
 No test suite — validate by smoke-testing a tool (`uv run python -c "from app.tools import sleeve_summary; print(sleeve_summary())"`) or hitting `POST /chat`. Server has no auto-reload; restart manually after Python changes. `web/` is served live.
@@ -42,14 +43,15 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - `app/chat.py` — provider-agnostic tool-use loop, up to 8 rounds. Auto-injects `_source="chat:{conv_id}/user:{username}"` (or `/guest`) into write tools via `inspect.signature`. Filtra `TOOLS` per ruolo: guest vede solo i read tools (vedi `tools.WRITE_TOOLS`).
 - `app/tools.py` — all tools. Adding one = function + JSON schema in `TOOLS` + entry in `TOOL_FUNCS`. Write tools must declare `_source: str | None = None` AND be added to `WRITE_TOOLS` set (source of truth per il gating guest/owner — non basta l'euristica `_source` perché `ingest_rulebook` scrive ma non ha `_source`).
 - `app/llm.py` — `Provider` ABC with three impls: `AnthropicProvider` (`claude-sonnet-4-6`), `DeepSeekProvider` (`deepseek-chat`, OpenAI-compatible — **current production default per `.env`**, ~10× cheaper than Sonnet), `OllamaProvider` (local, archived — see memory). Selection per-request via `LLM_PROVIDER`. Web search is client-side (Tavily tool in `app/tools.py`) — no provider-specific search anymore. `/library/filter` is hardcoded to `deepseek-chat` (override via `LIBRARY_FILTER_MODEL`).
-- `app/schema.py` — star schema DDL + idempotent v1→v7 migration on every boot (latest: `users` table for owner login).
+- `app/schema.py` — star schema DDL + idempotent v1→v8 migration on every boot (latest: `friendly_tags` JSON-array column on `games`).
+- `app/friendly_tags.py` — LLM-generated user-friendly tags (DeepSeek `deepseek-chat`, T=0, vocabolario fisso di 19 voci). Genera 3-5 tag/gioco da nome+description+BGG cats/mechs+weight+duration. Called post-commit da `add_game`/`update_game`/`add_to_wishlist`/`update_wishlist` (best-effort) + batch via `etl/generate_friendly_tags.py`. Vocab decoupled: cambiarlo richiede regenerare tutto il catalogo (`--force`).
 - `app/audit.py` — every write to `games`/`sleeve_requirements`/`sleeve_inventory` logs to `changes`.
 - `app/conversations.py` — server-side conversation persistence + `_title_from_history` (DeepSeek `deepseek-chat`, T=0, ~$0.0001/conv; first save only, then COALESCE-sticky; truncation fallback if no `DEEPSEEK_API_KEY` or the call fails).
 - `app/db.py` — SQLite connection. Reads env `BOARDY_DB` (Docker volume path); falls back to `<repo>/data/boardy.db`.
 - `app/games_semantic.py` — hybrid SQL+cosine over `games.description_embedding`. Reuses `_model_lazy()` from `rulebooks.py` (single 280MB load).
 - `app/rulebooks.py` — pypdf chunking + e5 embeddings + brute-force cosine.
 - `web/index.html` — chat UI (single-file vanilla JS + `marked.js`). No build step.
-- `web/library.html` — library page: grid/table toggle, multi-select category/mechanic filters, smart-filter chatbot (`/library/filter`).
+- `web/library.html` — library page: grid/table toggle, multi-select **friendly_tags** filter (raw BGG categories/mechanics still in DB but not surfaced in UI), smart-filter chatbot (`/library/filter`) — chatbot estrae anch'esso `friendly_tags` invece di cats/mechs.
 - `web/sleeves.html` — sleeve dashboard: KPI cards, Da comprare, Buste future (wishlist preview), Pronti da sleevare, mini-chat dock.
 - `web/wishlist.html` — wishlist page: grid+table, priority chips, Promise-based confirm modal for buy/remove, chat dock.
 - `web/login.html` — standalone login form (POST `/auth/login` → set cookie → redirect `?next=...`). No nav, no sidebar; matches the dark theme.
