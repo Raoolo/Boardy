@@ -96,7 +96,7 @@ services:
     env_file: ../.env
     environment:
       # Override per il networking interno: il bot trova boardy via DNS docker.
-      BOARDY_BASE_URL: http://boardy:8765
+      BOARDY_BASE_URL: http://0.0.0.0:8765
       # Stesso path del DB → telegram_chats.json va nello stesso volume,
       # cosi' il restart del container non perde la mappatura conv_id.
       BOARDY_DB: /data/boardy.db
