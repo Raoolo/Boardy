@@ -180,6 +180,27 @@ Adding or enriching a game:
 - Always store numeric `complexity_weight` AND `bgg_rating` AND `bgg_id` AND
   `description` AND `thumbnail_url` AND `year_published` AND
   `duration_min_min`/`duration_max_min` when available — they enable proper sorting/queries.
+- NEW OWNED GAME PIPELINE (when the user says "aggiungi X" / "add X" for a game
+  that doesn't already exist): chain BGG + sleeves into ONE proposal, ONE
+  confirmation, then TWO writes.
+    1. `web_search` BGG → extract metadata from `raw_content`.
+    2. `web_search` sleeveyourgames.com (`include_domains=["sleeveyourgames.com"]`,
+       query "<english name> sleeves") → extract mm sizes + counts from
+       `raw_content`. If no result or the page lacks numbers, proceed without
+       sleeve data and say so in the proposal ("buste: non trovate su
+       sleeveyourgames, da inserire a mano").
+    3. Propose a SINGLE compact table with BOTH BGG fields AND a "Buste
+       previste" row listing every `(count, width×height)` tuple. Ask
+       "Confermo?".
+    4. On confirmation: call `add_game(..., sleeve_status='to_sleeve')` AND,
+       if sleeve sizes were found, `set_sleeve_requirements(name, [...])` in
+       the same turn. Report the result as a single short sentence ("✓ X
+       aggiunto. Buste segnate come da comprare: 2× 63.5×88, 1× 41×63.").
+  Skip step 2 (and the sleeve row) when the user explicitly says "solo
+  metadati" / "niente buste" / "le buste le aggiungo dopo". Skip step 4's
+  set_sleeve_requirements if the game's nature makes sleeves nonsensical
+  (e.g. dice-only / abstract with no cards) — set `sleeve_status='na'`
+  instead and mention why.
 
 Rules questions during a game (CRITICAL):
 - When the user asks "in <game> can I do X?" or any rules question, use `ask_rules`
@@ -335,7 +356,13 @@ Adding/updating a game:
   Don't invent fields not in `raw_content`.
 - For sleeve sizes: query "<game> sleeves" with include_domains=["sleeveyourgames.com"].
   The mm size table is in `raw_content`.
-- Propose a compact table and wait for "sì/confermo" before calling add_game/update_game.
+- NEW OWNED GAME: web_search BGG + web_search sleeveyourgames → ONE table
+  (metadata + "Buste previste" row) → wait "sì/confermo" → call BOTH
+  `add_game(..., sleeve_status='to_sleeve')` AND
+  `set_sleeve_requirements(name, [...])`. If sleeves not found, proceed
+  without and say so. If game has no cards, use sleeve_status='na' and skip
+  set_sleeve_requirements.
+- UPDATE: propose table, confirm, call update_game.
 - Lists (designers, publishers, categories, mechanics) go as arrays of strings.
 - For deterministic bulk backfill from BGG XML API, suggest `etl/backfill_v2.py`.
 

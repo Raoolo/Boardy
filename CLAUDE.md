@@ -8,6 +8,7 @@ Personal board-game inventory chatbot. Single-user, runs on Windows. Natural-lan
 uv sync                                            # install deps
 uv run uvicorn app.main:app --port 8765            # run web app
 uv run python etl/import_excel.py                  # upsert-by-name re-import (see Conventions)
+uv run python -m bot.telegram_bot                  # Telegram bot (optional, vedi sezione Deploy)
 ```
 
 Backfills (run in order on a fresh DB):
@@ -28,6 +29,7 @@ app/         FastAPI app + chat loop + tools (read code first)
 etl/         One-shot scripts: Excel import, BGG backfill, embeddings
 web/         Static HTML pages (index/library/sleeves/wishlist), no build step
 deploy/      Dockerfile + docker-compose.yml (compose pins `name: boardy` so volumes stay stable)
+bot/         Telegram bot (opzionale): thin client su POST /chat
 docs/        LEARNINGS.md (tribal knowledge) + TODO.md (prioritized backlog)
 rulebooks/   PDF rulebooks (gitignored — copyright + bulky)
 data/        Source data + runtime DB + backups (Excel, boardy.db, *.db.bak)
@@ -56,6 +58,7 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - `web/wishlist.html` — wishlist page: grid+table, priority chips, Promise-based confirm modal for buy/remove, chat dock.
 - `web/login.html` — standalone login form (POST `/auth/login` → set cookie → redirect `?next=...`). No nav, no sidebar; matches the dark theme.
 - `web/static/auth.js` — shared client helper (`BoardyAuth.state()`, `mountBadge(headerEl)`, `isOwner()`, `logout()`). Caricato da tutte le 4 pagine via `<script src="/static/auth.js"></script>` per il chip auth in topbar.
+- `bot/telegram_bot.py` — client Telegram opzionale (PTB v21, async). Thin wrapper su `POST /chat`: niente duplicazione del chat loop. Auth a 2 ruoli specchiata sul web: allow-list `TELEGRAM_OWNER_IDS` → cookie-auth con `BOARDY_BOT_USERNAME`/`PASSWORD` → conv Boardy persistita; chi non e' in lista parla in guest mode (history client-side in memoria del bot). Mapping `chat_id → conversation_id` salvato in `<BOARDY_DB dir>/telegram_chats.json`. Comandi: `/start`, `/new` (reset conv), `/whoami` (mostra user_id + ruolo), `/help`.
 
 ## Companion docs (read before non-trivial work)
 
@@ -65,12 +68,14 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - `secondbrain/memo-deploy-howto.md` — exact Docker/git commands for self-host (setup, update workflow, troubleshooting table).
 - `secondbrain/memo-deploy-caveman.md` — mental model of the deploy (restaurant analogy + real-life examples). Read first when re-orienting after a break.
 - `secondbrain/memo-auth-caveman.md` — auth in caveman mode (portiere/braccialetto). Use when explaining the login model to a friend or auditing what can/cannot leak.
+- `secondbrain/memo-telegram-bot.md` — setup + troubleshooting del bot Telegram (token, allow-list, comandi, deploy Docker, modifiche frequenti).
 - `secondbrain/` (broader) — the user's Obsidian vault. Notes about Boardy live here; cross-references to other personal projects may exist. Don't write to it without being asked.
 
 ## Conventions
 
 - **Reply in the user's language.** Italian for Italian prompts; the user mixes IT/EN freely.
 - **Confirm before destructive ops.** `delete_game` and BGG-enriched `add_game`/`update_game` must propose a table and wait for "sì/confermo".
+- **NEW owned game = BGG + sleeves in one shot.** When the user asks to add a brand-new owned game (via chat, not ETL), Boardy must `web_search` BGG **and** `web_search` sleeveyourgames in the same turn, propose ONE compact table that includes a "Buste previste" row, and on confirmation call BOTH `add_game(..., sleeve_status='to_sleeve')` AND `set_sleeve_requirements(name, [...])`. Skip the sleeve fetch only on explicit "solo metadati"/"niente buste" or when the game has no cards (use `sleeve_status='na'` then). Rationale: previously the sleeve step was optional and non-deterministic; unifying it removes the "ah giusto, ora cercami anche le buste" follow-up.
 - **`etl/import_excel.py` upserts by `name`** (since 2026-05-04). Existing games get their ETL-managed columns refreshed (players/duration/complexity/condition/sleeve_status); BGG-enriched fields and chat-added games survive. Caveat: if a chat-cleaned name diverges from the Excel cell you get a duplicate — see LEARNINGS 2026-05-04.
 - **No "Fonti:" prose sections** after web_search — system prompt forbids it (post-processor mangles them). Inline `[label](url)` only.
 - **`add_to_inventory(width, height, delta, ...)` is preferred** over `update_inventory` for purchases/consumption: server-side arithmetic, refuses negative results.
@@ -93,15 +98,21 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 - `BOARDY_SESSION_SECRET` — **required** in production. Chiave per firmare il cookie di sessione owner. Genera con `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Senza, l'app crasha al primo `/auth/login`. Ruotarla invalida tutti i cookie esistenti (logout globale).
 - `BOARDY_COOKIE_SECURE` — `1` in produzione HTTPS (cookie marcato `Secure`, browser rifiuta su HTTP); lascia unset in dev locale (`http://localhost`).
 - `CF_TUNNEL_TOKEN` — Cloudflare Tunnel token. Required ONLY for `docker compose --profile tunnel` (self-host deploy). Generated by the tunnel owner in the CF dashboard (Zero Trust → Networks → Tunnels → Create → token).
+- `TELEGRAM_BOT_TOKEN` — required ONLY per `bot/telegram_bot.py`. Crealo via @BotFather su Telegram.
+- `TELEGRAM_OWNER_IDS` — allow-list (CSV di interi) degli user_id Telegram considerati owner. Non-owner = guest (read-only). `/whoami` sul bot mostra il proprio user_id.
+- `BOARDY_BOT_USERNAME` / `BOARDY_BOT_PASSWORD` — account Boardy con cui il bot fa `POST /auth/login` per i messaggi degli owner. Crealo con `etl/create_user.py create`.
+- `BOARDY_BASE_URL` — URL base di Boardy. Default `http://127.0.0.1:8765` (locale); il compose lo sovrascrive a `http://boardy:8765` (rete docker interna).
 - First run downloads ~1GB to `~/.cache/huggingface/` for the e5 model. Subsequent loads ~3s. In the Docker image the model is pre-cached at build time → no first-boot download.
 
 ## Deploy / Self-host (Docker)
 
-Docker files live in `deploy/`. The compose file pins `name: boardy` so the volume is always `boardy_boardy_db` regardless of where you invoke from. Two modes from one `deploy/docker-compose.yml`:
+Docker files live in `deploy/`. The compose file pins `name: boardy` so the volume is always `boardy_boardy_db` regardless of where you invoke from. Profiles sono additivi:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --build              # local: boardy on http://127.0.0.1:8765
-docker compose -f deploy/docker-compose.yml --profile tunnel up -d     # server: boardy + cloudflared, public via CF Tunnel
+docker compose -f deploy/docker-compose.yml up -d --build                              # local: boardy on http://127.0.0.1:8765
+docker compose -f deploy/docker-compose.yml --profile tunnel up -d                     # server: boardy + cloudflared (public via CF Tunnel)
+docker compose -f deploy/docker-compose.yml --profile telegram up -d                   # server: boardy + telegram bot
+docker compose -f deploy/docker-compose.yml --profile tunnel --profile telegram up -d  # entrambi
 ```
 
 Tip: export `COMPOSE_FILE=deploy/docker-compose.yml` in the server shell to drop the `-f` flag from subsequent commands.
@@ -117,3 +128,10 @@ Tip: export `COMPOSE_FILE=deploy/docker-compose.yml` in the server shell to drop
 4. `docker compose -f deploy/docker-compose.yml --profile tunnel up -d`. The tunnel comes up, hostname resolves, TLS handled by Cloudflare. No port forwarding needed on the host.
 
 The Docker image bakes the e5 model (~1.5GB total). First build ~3-5 min, subsequent rebuilds (deps unchanged) under 1 min thanks to layer cache.
+
+**Telegram bot setup** (one-time):
+1. @BotFather su Telegram → `/newbot` → copia il token.
+2. `TELEGRAM_BOT_TOKEN=...` in `.env`.
+3. Lancia il bot una volta in locale (`uv run python -m bot.telegram_bot`), poi mandagli `/whoami` da Telegram per scoprire il tuo `user_id`. Mettilo in `TELEGRAM_OWNER_IDS=<id>` (CSV se piu' di uno).
+4. Configura `BOARDY_BOT_USERNAME` / `BOARDY_BOT_PASSWORD` (account creato con `etl/create_user.py`).
+5. Server: `docker compose -f deploy/docker-compose.yml --profile telegram up -d`. Stato (mapping `chat_id → conv_id`) persistito su `data/telegram_chats.json` nel named volume.

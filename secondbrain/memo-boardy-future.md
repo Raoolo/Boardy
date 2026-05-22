@@ -187,9 +187,9 @@ If browser STT quality disappoints in Italian: Whisper.cpp local server, or Open
 
 ## 3. Other frontends sharing the same `/chat` endpoint
 
-- **Telegram bot** (`python-telegram-bot`) — easiest mobile path.
+- **Telegram bot** — ✅ implementato 2026-05-20 in `bot/telegram_bot.py`. Thin client async (PTB v21) su `POST /chat`. Allow-list owner via `TELEGRAM_OWNER_IDS`; owner→cookie auth + conv persistita; non-owner→guest mode. Stato `chat_id→conv_id` in `data/telegram_chats.json`. Comandi `/new`, `/whoami`, `/help`. Vedi `LEARNINGS.md` 2026-05-20 per le decisioni di design.
 - **WhatsApp** — requires a paid Business API gateway. Skip unless you actually need it.
-- **Discord bot** — fine if you live in Discord.
+- **Discord bot** — fine if you live in Discord. Stesso pattern del Telegram bot riusabile (thin client su `/chat`).
 
 ## 4. Auto-fill missing fields when adding a new game
 

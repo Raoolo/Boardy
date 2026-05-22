@@ -5,7 +5,7 @@
 # project name with `name: boardy` (top-level) keeps the volume always named
 # `boardy_boardy_db` regardless of where compose is invoked from.
 #
-# Two services with distinct activation modes:
+# Three services with distinct activation modes (profiles are additive):
 #
 #   docker compose -f deploy/docker-compose.yml up -d
 #       → only boardy, on localhost:8765 (dev / single-machine LAN)
@@ -13,6 +13,11 @@
 #   docker compose -f deploy/docker-compose.yml --profile tunnel up -d
 #       → boardy + cloudflared (server-side deploy via CF Tunnel; requires
 #         CF_TUNNEL_TOKEN in .env)
+#
+#   docker compose -f deploy/docker-compose.yml --profile telegram up -d
+#       → boardy + telegram-bot (mobile client via Telegram; requires
+#         TELEGRAM_BOT_TOKEN + TELEGRAM_OWNER_IDS in .env).
+#       Combinabile col profilo tunnel: `--profile tunnel --profile telegram`.
 #
 # Bind-mounting code (app/, etl/, web/) is intentional: typical update loop
 # on the server is `git pull && docker compose -f deploy/docker-compose.yml
@@ -75,6 +80,34 @@ services:
       - boardy
     networks:
       - boardy_net
+
+  # Telegram bot — thin client su POST /chat. Stesso Dockerfile/build di
+  # boardy: in pratica Docker riusa i layer cache, e il container parte con
+  # un command override che lancia il bot invece di uvicorn. BOARDY_BASE_URL
+  # punta al service `boardy` sulla rete interna — niente esposizione
+  # pubblica della porta 8765 richiesta.
+  telegram-bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: boardy-telegram
+    restart: unless-stopped
+    profiles: ["telegram"]
+    env_file: ../.env
+    environment:
+      # Override per il networking interno: il bot trova boardy via DNS docker.
+      BOARDY_BASE_URL: http://boardy:8765
+      # Stesso path del DB → telegram_chats.json va nello stesso volume,
+      # cosi' il restart del container non perde la mappatura conv_id.
+      BOARDY_DB: /data/boardy.db
+    volumes:
+      - ../bot:/app/bot:ro
+      - boardy_db:/data
+    depends_on:
+      - boardy
+    networks:
+      - boardy_net
+    command: ["python", "-m", "bot.telegram_bot"]
 
 volumes:
   boardy_db:

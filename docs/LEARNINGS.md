@@ -12,6 +12,38 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-05-20 — Telegram bot come thin client di `POST /chat`
+
+Implementato `bot/telegram_bot.py` (PTB v21, async). Scelte di design che vale la pena ricordare:
+
+**Thin client, non chat-loop duplicato.** Il bot NON importa `app.chat.chat()` — fa una HTTP call a `POST /chat`. Sembra ridondante (processo separato che parla allo stesso host) ma sblocca: (a) restart indipendente (bug nel bot non tira giù la web app); (b) opt-in totale via profilo docker; (c) zero duplicazione del tool-gating/audit/persistence — se cambio i tool in `app/tools.py`, il bot li eredita gratis.
+
+**Allow-list owner via env, non login Telegram-side.** Discusso: chiedere `/start <password>` per promuovere chat_id a owner. Scartato perché la password girerebbe in cleartext nei log Telegram (CDN, server, mirror). L'allow-list di `user_id` numerici è (i) non-spoofabile lato Telegram (l'API li dà autenticati), (ii) un dato pubblico (basta `/whoami` per scoprirlo), (iii) zero credenziali sensibili in env.
+
+**Due client httpx separati per owner vs guest.** Mantiene il cookie owner in un `AsyncClient` long-lived; per i guest crea un `AsyncClient` one-shot. Motivo: paranoia. Se la stessa chat passa owner→guest (cambio env, rimozione di un user_id), zero chance di portare avanti il cookie owner per errore.
+
+**Persistenza mapping `chat_id → conv_id` su JSON file, non DB.** File `<BOARDY_DB dir>/telegram_chats.json`. Sta nel named volume con il DB → sopravvive ai restart container. Alternative scartate: (a) tabella in `boardy.db` — overkill per un dict piatto e mette il bot in dipendenza dallo schema (migrate, ecc.); (b) solo in-memoria — restart perde la conv attiva, UX bruttina.
+
+**Guest history NON persistita.** Specchia il web frontend che usa `sessionStorage`. Restart bot = history guest perse, by design.
+
+**Fallback Markdown → plain text.** Telegram parse_mode legacy "Markdown" tollera molto, ma occasionalmente fallisce su asterischi non bilanciati o URL strani. `try: parse_mode=MARKDOWN / except: plain` evita di perdere risposte legittime.
+
+---
+
+## 2026-05-20 — `add_game` ora chiama anche `set_sleeve_requirements` di default
+
+Modifica al solo system prompt (`app/chat.py`, sia `SYSTEM_PROMPT_BASE` che `SYSTEM_PROMPT_SLIM`): quando l'utente chiede di aggiungere un nuovo gioco posseduto via chat, Boardy fa **due** `web_search` (BGG + sleeveyourgames), propone **una** tabella unica con riga "Buste previste", e su conferma chiama in sequenza `add_game(sleeve_status='to_sleeve')` + `set_sleeve_requirements`.
+
+Prima la ricerca buste era documentata in una sezione separata ("se ti servono le buste fai questa query") e il modello la innescava in modo non deterministico — a volte sì, a volte no, e tipicamente l'utente doveva chiedere "ah, cercami anche le buste" come follow-up. Ora è codificata come pipeline unica per il caso "nuovo gioco owned".
+
+Pattern: la scelta è **opzione 1** (catena con una sola conferma) anziché **opzione 2** (auto-fetch dopo `add_game` confermato). L'opzione 2 era più snappy ma rischiava di sleevare cose sbagliate senza che l'utente le vedesse in tabella. Una conferma di più si traduce in più trust.
+
+Skip esplicito: "solo metadati" / "niente buste" salta la web_search sleeveyourgames; se il gioco non ha carte (dadi-only, astratto) → `sleeve_status='na'` senza set_sleeve_requirements.
+
+NB: la pipeline analoga per **wishlist** (`add_to_wishlist`) era già implementata da prima — quella resta invariata.
+
+---
+
 ## 2026-05-14 (sera) — Auth (owner login + guest read-only) & gotcha passlib/bcrypt 5
 
 Aggiunti login owner (username/password locale) + modalità guest read-only. Schema v7 = `users` table; cookie firmato (itsdangerous); chat guest in `sessionStorage` lato client (zero GDPR concern); tool gating per ruolo in `app/chat.py`. Dettagli completi nel TODO `Auth + guest mode`. Tre cose vale la pena ricordare oltre quel changelog:

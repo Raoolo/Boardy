@@ -20,6 +20,9 @@ dependencies = [
     # (passlib 1.7.4 e' incompatibile con bcrypt>=5 — vedi app/auth.py).
     "bcrypt>=4.0.0",
     "itsdangerous>=2.2.0",
+    # Telegram bot (optional client — `uv run python -m bot.telegram_bot`).
+    # PTB v21 e' async, gia' batterie incluse (httpx interno per le call API).
+    "python-telegram-bot>=21.0",
 ]
 
 [tool.uv]
