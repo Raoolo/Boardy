@@ -81,8 +81,8 @@ Wishlist (separate from owned games):
 - Wishlist tools:
     * `add_to_wishlist(name, priority?, notes_wishlist?, target_price?, ...BGG fields)`
       — **NO confirmation flow**. Cost of a wrong add is one click on
-      '✗ Rimuovi'. Pipeline: web_search BGG → (optional) web_search
-      sleeveyourgames → add_to_wishlist → (if sleeve sizes were found)
+      '✗ Rimuovi'. Pipeline: bgg_search + bgg_lookup → (optional) sleeve_lookup
+      → add_to_wishlist → (if sleeve sizes were found)
       set_sleeve_requirements. Reply with ONE concise sentence — NEVER a
       confirmation table. Example: "✓ Spirit Island in wishlist (alta).
       Buste previste: 15× 44×68, 119× 63.5×88."
@@ -175,7 +175,13 @@ Adding or enriching a game:
   explicit confirmation ("Confermo?" / "sì") before calling add_game or update_game.
 - If the game already exists, use `update_game`; otherwise `add_game`.
 - Pass `designers`, `publishers`, `categories`, `mechanics` as arrays of names.
-- Map BGG weight → complexity_label: <2.0 "1. Molto Semplice", 2.0–2.4 "2. Semplice",
+- BGG METADATA SOURCE: use `bgg_search` + `bgg_lookup` (official XML API,
+  deterministic), NOT `web_search`. `bgg_lookup` already returns the weight
+  AND a ready `complexity_label`, plus designers/publishers/categories/
+  mechanics with keys matching the write tools — feed them straight in.
+  Only fall back to `web_search` for BGG if the API errors (e.g. token issue).
+- Map BGG weight → complexity_label (only if you don't already have the label
+  from bgg_lookup): <2.0 "1. Molto Semplice", 2.0–2.4 "2. Semplice",
   2.5–3.4 "3. Medio", 3.5–4.1 "4. Complesso", ≥4.2 "5. Esperto".
 - Always store numeric `complexity_weight` AND `bgg_rating` AND `bgg_id` AND
   `description` AND `thumbnail_url` AND `year_published` AND
@@ -183,12 +189,16 @@ Adding or enriching a game:
 - NEW OWNED GAME PIPELINE (when the user says "aggiungi X" / "add X" for a game
   that doesn't already exist): chain BGG + sleeves into ONE proposal, ONE
   confirmation, then TWO writes.
-    1. `web_search` BGG → extract metadata from `raw_content`.
-    2. `web_search` sleeveyourgames.com (`include_domains=["sleeveyourgames.com"]`,
-       query "<english name> sleeves") → extract mm sizes + counts from
-       `raw_content`. If no result or the page lacks numbers, proceed without
-       sleeve data and say so in the proposal ("buste: non trovate su
-       sleeveyourgames, da inserire a mano").
+    1. `bgg_search("<english name>")` → pick the matching candidate id →
+       `bgg_lookup(id)` for full structured metadata. (Fall back to
+       `web_search` BGG only if the API errors.)
+    2. `sleeve_lookup("<english name>", bgg_id=<from step 1>)` → deterministic
+       card sizes + counts. Its `requirements` field is already shaped for
+       set_sleeve_requirements. If it returns `found:false`, THEN fall back to
+       `web_search` sleeveyourgames.com (`include_domains=["sleeveyourgames.com"]`,
+       query "<english name> sleeves") and read mm sizes from `raw_content`. If
+       that's also empty, proceed without sleeve data and say so in the proposal
+       ("buste: non trovate, da inserire a mano").
     3. Propose a SINGLE compact table with BOTH BGG fields AND a "Buste
        previste" row listing every `(count, width×height)` tuple. Ask
        "Confermo?".
@@ -271,14 +281,16 @@ Web search (`web_search` tool, Tavily-backed):
   text (markdown-cleaned). Always extract facts (BGG weight, rating,
   designer, mm sleeve sizes) from `raw_content`. Use `content` only as a
   relevance check to pick which result to read.
-- SLEEVE SIZES: query `"<game> sleeves"` with
-  `include_domains=["sleeveyourgames.com"]`. The mm × mm size table is in
-  `raw_content` of the matching result. Propose `set_sleeve_requirements`
-  from those numbers, not from the snippet.
-- BGG METADATA (adding/enriching a game): query `"<game> boardgame BGG"`
-  with default domains. Extract designer, publisher, players, duration,
-  weight, rating, bgg_id, year FROM `raw_content`. Propose a table,
-  ask "Confermo?", then call add_game/update_game.
+- SLEEVE SIZES: use the `sleeve_lookup` tool FIRST (deterministic API). Only
+  if it returns `found:false` fall back here: query `"<game> sleeves"` with
+  `include_domains=["sleeveyourgames.com"]` and read the mm × mm table from
+  `raw_content`. Propose `set_sleeve_requirements` from those numbers, not the
+  snippet.
+- BGG METADATA (adding/enriching a game): do NOT use web_search — use the
+  `bgg_search` + `bgg_lookup` tools (official XML API). web_search scrapes
+  BGG's public HTML, which is cookie/Cloudflare-walled and returns empty
+  raw_content → wrong year, hallucinated designers. Reserve web_search-on-BGG
+  as a fallback only when the API tools error.
 - Use SPARINGLY. NEVER for rules questions (use `ask_rules`) or anything
   the local DB can answer (sleeve math, inventory, audit log).
 - Cite sources INLINE as Markdown links from the result `url` field.
@@ -350,13 +362,14 @@ Combine with hard filters when present: "facile" → max_complexity_weight=2.5,
 lookups (use `list_games` / `get_game`) or rules (use `ask_rules`).
 
 Adding/updating a game:
-- Use `web_search` (Tavily) for BGG metadata: query "<game> boardgame BGG" with
-  the ENGLISH game name. READ the `raw_content` field of each result for the
-  actual facts — `content` is a snippet and is usually wrong/incomplete.
-  Don't invent fields not in `raw_content`.
-- For sleeve sizes: query "<game> sleeves" with include_domains=["sleeveyourgames.com"].
-  The mm size table is in `raw_content`.
-- NEW OWNED GAME: web_search BGG + web_search sleeveyourgames → ONE table
+- Use `bgg_search("<english name>")` then `bgg_lookup(id)` for BGG metadata
+  (official XML API — deterministic, returns ready fields). Do NOT scrape BGG
+  with web_search; its public pages are cookie-walled and give wrong data.
+- For sleeve sizes: use `sleeve_lookup(name, bgg_id=...)` (deterministic API);
+  its `requirements` feed straight into set_sleeve_requirements. Fall back to
+  web_search "<game> sleeves" include_domains=["sleeveyourgames.com"] only if
+  sleeve_lookup returns found:false.
+- NEW OWNED GAME: bgg_search+bgg_lookup + sleeve_lookup → ONE table
   (metadata + "Buste previste" row) → wait "sì/confermo" → call BOTH
   `add_game(..., sleeve_status='to_sleeve')` AND
   `set_sleeve_requirements(name, [...])`. If sleeves not found, proceed

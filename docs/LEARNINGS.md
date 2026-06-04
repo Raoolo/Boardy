@@ -12,6 +12,20 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-06-04 — BGG metadata: tool `bgg_search`/`bgg_lookup` invece di scraping via web_search
+
+**Sintomo.** Aggiungendo "Intarsia" (conv #27), il modello ha fatto **13 chiamate `web_search`** (tutte Tavily), ha sbagliato anno (2025→2024) e designer ("Bordspelwereld", che è un publisher olandese, invece di **Michael Kiesling**), e ha confabulato categorie/meccaniche. Quando l'utente ha chiesto "non hai la chiave API?", il modello ha *detto* di sì e poi ha incollato `xmlapi2/thing?id=422126` **dentro la query Tavily** — che fa una ricerca testuale, non scarica l'URL.
+
+**Causa radice — buco di tooling, non bug di logica.** `etl/bgg_api.fetch_thing()`/`search()` esistevano e funzionano perfettamente, ma erano chiamati SOLO internamente da `_backfill_bgg_media()` (thumbnail/image post-write). **Nessun tool BGG-API era esposto alla chat**: l'unico strumento per dati esterni era `web_search`. E lo scraping della pagina pubblica BGG è cookie/Cloudflare-walled → Tavily ritorna `raw_content: ""` (l'unica cosa leggibile è il banner consensi cookie — da lì il "bloccato dai cookie"). Questo combacia col vecchio learning sullo scraping BGG fallito.
+
+**Fix.** Aggiunti due read tool in `app/tools.py`: `bgg_search(query, types?)` → candidati `{id,name,year,type}`; `bgg_lookup(bgg_id)` → metadati completi (keys già allineate a `add_game`/`add_to_wishlist`). System prompt (`app/chat.py`, sia BASE che SLIM) riscritto: BGG metadata = `bgg_search`+`bgg_lookup`, `web_search` solo come fallback se l'API erra. Verifica end-to-end: stessa richiesta Intarsia → **2 chiamate**, dati corretti.
+
+**Da ricordare.** (a) L'API XML BGG **non** espone misure carte/sleeve → per le "Buste previste" vedi la sezione sleeve qui sotto. (b) `bgg_lookup` ritorna già `complexity_label` calcolata + strippa le chiavi interne `_bgg_*`. (c) Sono read tool → NON in `WRITE_TOOLS`, quindi anche i guest possono consultare BGG (corretto). (d) Richiedono `BGG_API_TOKEN` in `.env` (già necessario per i backfill).
+
+**Sleeve sizes → tool `sleeve_lookup` (API privata sleeveyourgames.com).** Stessa sessione: l'API BGG non dà le buste, quindi ho reverse-engineerato sleeveyourgames (Nuxt SPA). Scoperte: la pagina pubblica `/sleeves/{id}` è SSR e dà **500 ai bot**; ma il backend è un'**API JSON CORS-aperta, senza Cloudflare**, a `https://api.sleeveyourgames.com`. Endpoint utili (servono header browser UA+Origin+Referer, sennò WAF "noindex"): `GET /game/autocomplete?query=<nome>` → `[{text, id}]`; `GET /game/{id}` → JSON con `cards: [{card_quantity, height, width}]` (mappa 1:1 su `set_sleeve_requirements`!), `expansions[].cards`, e un `bgg_id` per confermare il match. Client isolato in `etl/syg_api.py` (stile `bgg_api.py`: HTTP+parse separati, cache `etl/.syg_cache/`); tool `sleeve_lookup(name, bgg_id?)` in `app/tools.py`. Verificato: Wingspan → 212 carte 57×87 + 4 espansioni, `bgg_id_match:true`. **Caveat:** API privata non documentata → può rompersi (mitigato: fallback a web_search→manuale, tutto in un file). **Limite strutturale:** giochi troppo nuovi (es. Intarsia 2024) NON sono ancora nel DB di sleeveyourgames → `found:false`, nessuna fonte automatica esiste, solo inserimento manuale. Pipeline nuovo: `bgg_search`+`bgg_lookup`+`sleeve_lookup` (in parallelo) → tabella → conferma → `add_game`+`set_sleeve_requirements`.
+
+---
+
 ## 2026-05-20 — Telegram bot come thin client di `POST /chat`
 
 Implementato `bot/telegram_bot.py` (PTB v21, async). Scelte di design che vale la pena ricordare:

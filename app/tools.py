@@ -925,6 +925,121 @@ def web_search(query: str, include_domains: list[str] | None = None,
     }
 
 
+def bgg_search(query: str, types: list[str] | None = None) -> dict:
+    """Search the BoardGameGeek XML API for games matching a name.
+
+    This is the DETERMINISTIC, authoritative lookup — it hits BGG's official
+    XML API (bearer-authed, no scraping), so it returns clean structured data
+    instead of the cookie-walled HTML that `web_search` gets from BGG public
+    pages. Use it to resolve a name → the right `bgg_id`, then call
+    `bgg_lookup(bgg_id)` for full metadata.
+
+    Args:
+        query: game name in ENGLISH (BGG indexes English/primary titles).
+        types: optional filter, subset of
+            ["boardgame", "boardgameexpansion", "boardgameaccessory"].
+            Default: base games + expansions.
+
+    Returns a list of candidates `{id, name, year, type}`, most recent first.
+    Pick the id whose name+year match, then `bgg_lookup` it.
+    """
+    from etl import bgg_api
+    allowed = ("boardgame", "boardgameexpansion", "boardgameaccessory")
+    if types:
+        t = tuple(x for x in types if x in allowed) or ("boardgame", "boardgameexpansion")
+    else:
+        t = ("boardgame", "boardgameexpansion")
+    try:
+        candidates = bgg_api.search(query, types=t)
+    except bgg_api.BGGError as e:
+        return {"error": str(e)}
+    except Exception as e:  # network etc.
+        return {"error": f"{type(e).__name__}: {e}"}
+    return {"query": query, "count": len(candidates), "candidates": candidates[:25]}
+
+
+def bgg_lookup(bgg_id: int) -> dict:
+    """Fetch full structured metadata for a single game from the BGG XML API.
+
+    DETERMINISTIC source — preferred over `web_search` for ALL BGG metadata
+    when adding/enriching a game. One call returns everything the DB stores:
+    year, players (min/max/best), duration, age, complexity weight+label,
+    BGG rating, description, thumbnail/image URLs, designers, publishers,
+    categories, mechanics. No cookie wall, no hallucinated designers.
+
+    The returned dict's keys already match `add_game`/`update_game`/
+    `add_to_wishlist` kwargs (bgg_id, year_published, players_min, …,
+    designers, publishers, categories, mechanics) — so you can propose the
+    table from this and pass the same fields straight into the write tool.
+
+    Note: BGG's XML API does NOT expose card/sleeve sizes — for "Buste
+    previste" you still need `web_search` on sleeveyourgames.com.
+
+    Args:
+        bgg_id: the BoardGameGeek game id (from `bgg_search` or the URL,
+            e.g. boardgamegeek.com/boardgame/422126/... → 422126).
+    """
+    from etl import bgg_api
+    try:
+        data = bgg_api.fetch_thing(int(bgg_id))
+    except bgg_api.BGGError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+    if data is None:
+        return {"error": f"No BGG item found for id {bgg_id}."}
+    # Drop the internal `_bgg_*` debug keys before handing to the model.
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+def sleeve_lookup(name: str, bgg_id: int | None = None) -> dict:
+    """Look up card-sleeve sizes + counts for a game from sleeveyourgames.com.
+
+    DETERMINISTIC source for "Buste previste" — hits sleeveyourgames' JSON API
+    (name → id → card list), NOT web scraping. BGG's API does NOT expose card
+    sizes, so this is the structured source. Returns `requirements` already
+    shaped for `set_sleeve_requirements` ({count, width_mm, height_mm}), plus a
+    per-expansion breakdown.
+
+    Pass `bgg_id` (from bgg_lookup) when you have it: used to pick the right
+    candidate if the name is ambiguous, and echoed back as `bgg_id_match` so you
+    can sanity-check the hit.
+
+    Returns `{"found": false, ...}` when the game isn't in sleeveyourgames' DB
+    (common for very new releases). On a miss, fall back to `web_search`
+    (include_domains=["sleeveyourgames.com"]); if that's also empty, tell the
+    user the sizes must be entered manually. Does NOT cover non-card games.
+
+    Args:
+        name: game name (English works best — sleeveyourgames indexes English).
+        bgg_id: optional BGG id to disambiguate / verify the match.
+    """
+    from etl import syg_api
+    try:
+        parsed = syg_api.lookup(name, bgg_id=bgg_id)
+    except syg_api.SYGError as e:
+        return {"found": False, "error": str(e),
+                "hint": "Fall back to web_search on sleeveyourgames.com, then manual entry."}
+    except Exception as e:
+        return {"found": False, "error": f"{type(e).__name__}: {e}"}
+
+    if parsed is None:
+        return {"found": False, "name": name,
+                "hint": ("Not in sleeveyourgames' DB (often a very new game). "
+                         "Try web_search include_domains=['sleeveyourgames.com']; "
+                         "if empty, ask the user for the mm sizes.")}
+
+    return {
+        "found": True,
+        "name": parsed["name"],
+        "year": parsed["year"],
+        "bgg_id_match": parsed["bgg_id"] == bgg_id if bgg_id is not None else None,
+        "requirements": parsed["base_requirements"],   # feed straight into set_sleeve_requirements
+        "expansions": parsed["expansions"],
+        "source": "sleeveyourgames.com",
+    }
+
+
 def search_games_semantic(
     query: str,
     players: int | None = None,
@@ -1649,6 +1764,70 @@ TOOLS = [
         },
     },
     {
+        "name": "bgg_search",
+        "description": (
+            "Search the OFFICIAL BoardGameGeek XML API by game name. This is the "
+            "deterministic, authoritative source — it returns clean structured "
+            "candidates from BGG's API (bearer-authed), NOT cookie-walled scraped "
+            "HTML like web_search gets. USE THIS FIRST when adding/enriching a game: "
+            "bgg_search('<english name>') → pick the candidate whose name+year match "
+            "→ bgg_lookup(id). Returns {id, name, year, type}, most recent first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Game name in English."},
+                "types": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["boardgame", "boardgameexpansion", "boardgameaccessory"]},
+                    "description": "Optional type filter. Default: base games + expansions.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "bgg_lookup",
+        "description": (
+            "Fetch FULL structured metadata for one game from the official BGG XML "
+            "API by its numeric id. PREFERRED over web_search for ALL BGG metadata "
+            "when adding/enriching a game — one call returns year, players "
+            "(min/max/best), duration, age, complexity weight+label, rating, "
+            "description, thumbnail/image, designers, publishers, categories, "
+            "mechanics. Keys match add_game/add_to_wishlist kwargs, so feed them "
+            "straight into the write tool after confirmation. Get the id from "
+            "bgg_search or a BGG URL (.../boardgame/422126/... → 422126). NOTE: the "
+            "API does NOT return card/sleeve sizes — use web_search on "
+            "sleeveyourgames.com for 'Buste previste'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"bgg_id": {"type": "integer", "description": "BoardGameGeek game id."}},
+            "required": ["bgg_id"],
+        },
+    },
+    {
+        "name": "sleeve_lookup",
+        "description": (
+            "Card-sleeve sizes + counts for a game, from sleeveyourgames.com's "
+            "JSON API (deterministic). USE THIS for 'Buste previste' instead of "
+            "web_search — BGG's API does NOT expose card sizes. Returns "
+            "`requirements` already shaped for set_sleeve_requirements "
+            "({count, width_mm, height_mm}) plus per-expansion breakdown. Pass "
+            "`bgg_id` (from bgg_lookup) to disambiguate/verify. If `found:false` "
+            "(game not in their DB — common for brand-new games), fall back to "
+            "web_search on sleeveyourgames.com, then ask the user to enter sizes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Game name (English works best)."},
+                "bgg_id": {"type": "integer", "description": "Optional BGG id to verify the match."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
         "name": "web_search",
         "description": (
             "Search the web for board-game info NOT in the local DB or rulebook index. "
@@ -1734,6 +1913,9 @@ TOOL_FUNCS = {
     "ingest_rulebook":         ingest_rulebook,
     "ask_rules":               ask_rules,
     "list_rulebooks":          list_rulebooks,
+    "bgg_search":              bgg_search,
+    "bgg_lookup":              bgg_lookup,
+    "sleeve_lookup":           sleeve_lookup,
     "web_search":              web_search,
 }
 
