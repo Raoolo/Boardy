@@ -12,6 +12,23 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-06-05 — Deploy ARM (Oracle Cloud): torch CPU-only + auto-find capacity
+
+**Contesto.** Avvio fase esecutiva del deploy su **Oracle Cloud Always Free ARM** (Ampere A1, fino 4 OCPU/24GB, gratis *per sempre* — non il Free Trial da 30gg). Due lavori tecnici preparati da locale prima di avere la VM.
+
+**1. torch CPU-only su tutte le piattaforme (`pyproject.toml` + lock rigenerato).** Il `torch` di PyPI dichiara le dipendenze CUDA/nvidia (`cuda-bindings`, `cuda-toolkit`, `nvidia-*-cu13`, `triton`) con marker `sys_platform == 'linux'` — che è vero **anche su `aarch64`**. Conseguenze sulla VM ARM: (a) quelle wheel CUDA non esistono per aarch64 → `uv sync --frozen` **rompe il build**; (b) anche dove esistono, sono **GB di CUDA inutile** (l'e5 fa inferenza su CPU ovunque — VM senza GPU + APU AMD locale). Fix: indice dedicato `[[tool.uv.index]] pytorch-cpu = https://download.pytorch.org/whl/cpu` + `[tool.uv.sources] torch = { index = "pytorch-cpu" }`. Risultato: `torch 2.12.0+cpu`, **zero** pacchetti nvidia nel lock, immagine molto più piccola. La wheel critica `torch-2.12.0+cpu-cp313-cp313-manylinux_2_28_aarch64.whl` esiste sull'indice CPU → ARM ok.
+- **Gotcha uv #1:** `[tool.uv.sources]` viene onorato **solo sulle dipendenze dirette**. torch arriva via sentence-transformers (transitiva) → l'override era ignorato finché non ho aggiunto `"torch>=2.2.0"` esplicito in `dependencies`.
+- **Gotcha uv #2:** il marker su una source (`{ index=..., marker="sys_platform=='linux'" }`) **non** viene rispettato dal lock universale di uv 0.11 → restava su PyPI. Source *unconditional* (CPU ovunque) funziona ed è comunque ciò che vogliamo.
+- **Gotcha uv #3:** `uv lock` è conservativo — non cambia sorgente se la versione pinnata "soddisfa" ancora. Serve `uv lock --upgrade-package torch` (o aggiungere la dep diretta, che forza il re-resolve).
+
+**2. OneDrive + `.venv` = file locking infernale.** Il progetto vive sotto OneDrive; durante lo swap torch 2.11→2.12 OneDrive teneva lockate `torchgen/static_runtime` ecc. → `uv sync` falliva con `Access is denied (os error 5)` e lasciava dist-info orfane (RECORD mancante), rompendo l'import. Fix: rimozione forzata con retry di `torch/torchgen/functorch/*.dist-info` poi `uv sync` pulito. Per i prossimi sync usa `uv run --no-sync` quando vuoi solo eseguire.
+
+**3. Build ARM = nativo sul server, niente cross-build.** Il workflow di deploy fa `docker compose up -d --build` **sulla VM ARM** → `docker build` produce arm64 nativamente. Il `Dockerfile` (base `python:3.13-slim`, multi-arch) non richiede modifiche `platform`. NON hardcodare `platform: linux/arm64` nel compose: romperebbe il build x86 locale.
+
+**4. Script `etl/oci_find_capacity.py`.** Auto-retry contro `Out of host capacity` (ServiceError 500, frequentissimo sulle A1 free). Cicla sulle AD con backoff+jitter, notifica Telegram opzionale (riusa `TELEGRAM_BOT_TOKEN`/`TELEGRAM_OWNER_IDS`). OCI SDK = dipendenza opzionale → lancia con `uv run --with oci python etl/oci_find_capacity.py ...`. Param via flag o env `OCI_*`.
+
+---
+
 ## 2026-06-04 — BGG metadata: tool `bgg_search`/`bgg_lookup` invece di scraping via web_search
 
 **Sintomo.** Aggiungendo "Intarsia" (conv #27), il modello ha fatto **13 chiamate `web_search`** (tutte Tavily), ha sbagliato anno (2025→2024) e designer ("Bordspelwereld", che è un publisher olandese, invece di **Michael Kiesling**), e ha confabulato categorie/meccaniche. Quando l'utente ha chiesto "non hai la chiave API?", il modello ha *detto* di sì e poi ha incollato `xmlapi2/thing?id=422126` **dentro la query Tavily** — che fa una ricerca testuale, non scarica l'URL.

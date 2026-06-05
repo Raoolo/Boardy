@@ -12,6 +12,10 @@ dependencies = [
     "python-multipart>=0.0.20",
     # Step 2 (rulebook RAG): local embeddings + PDF parsing
     "sentence-transformers>=3.0.0",
+    # torch dichiarato esplicito (anche se arriva via sentence-transformers)
+    # cosi' l'override `[tool.uv.sources]` verso l'indice CPU si applica —
+    # uv onora le sources solo sulle dipendenze dirette. Vedi nota sotto.
+    "torch>=2.2.0",
     "pypdf>=5.0.0",
     "numpy>=1.26.0",
     "openai>=2.33.0",
@@ -27,3 +31,20 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+# torch CPU-only da indice PyTorch dedicato, per TUTTE le piattaforme.
+# Boardy fa inferenza e5 sempre su CPU (deploy su VM senza GPU — Oracle Cloud
+# Always Free ARM Ampere A1; dev locale su APU AMD senza CUDA usabile). Senza
+# questo, il torch di PyPI tira le dipendenze CUDA/nvidia (markate
+# `sys_platform == 'linux'`, vero ANCHE su aarch64) → (a) su ARM quelle wheel
+# CUDA non esistono e `uv sync --frozen` rompe; (b) ovunque sono GB di CUDA
+# inutile nell'immagine. L'indice cpu serve x86_64, aarch64 e win/mac e NON
+# ha dipendenze nvidia. (Il marker-per-piattaforma su `[tool.uv.sources]` non
+# viene onorato dal lock universale di uv 0.11 → source unconditional.)
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

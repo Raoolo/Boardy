@@ -129,6 +129,8 @@ Tip: export `COMPOSE_FILE=deploy/docker-compose.yml` in the server shell to drop
 
 The Docker image bakes the e5 model (~1.5GB total). First build ~3-5 min, subsequent rebuilds (deps unchanged) under 1 min thanks to layer cache.
 
+**Oracle Cloud Always Free ARM (target deploy "spesa 0").** Il build è nativo arm64 sulla VM (`up -d --build`) — nessuna modifica `platform` serve. `torch` è pinnato all'indice CPU (`pyproject.toml`: `[tool.uv.sources] torch = pytorch-cpu`) per non tirare le wheel CUDA inesistenti su aarch64 / inutili su CPU — vedi LEARNINGS 2026-06-05. Per il provisioning della A1 (spesso `Out of host capacity`) usa `etl/oci_find_capacity.py` (auto-retry+backoff, notifica Telegram opzionale): `uv run --with oci python etl/oci_find_capacity.py --subnet ... --image ... --ssh-key ...` (OCI SDK è dipendenza opzionale, param anche via env `OCI_*`).
+
 **Telegram bot setup** (one-time):
 1. @BotFather su Telegram → `/newbot` → copia il token.
 2. `TELEGRAM_BOT_TOKEN=...` in `.env`.
