@@ -106,7 +106,7 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 
 ## Deploy / Self-host (Docker)
 
-Docker files live in `deploy/`. The compose file pins `name: boardy` so the volume is always `boardy_boardy_db` regardless of where you invoke from. Profiles sono additivi:
+Docker files live in `deploy/`. The compose file pins `name: boardy` so the project name is stable regardless of where you invoke from. Profiles sono additivi:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d --build                              # local: boardy on http://127.0.0.1:8765
@@ -119,7 +119,7 @@ Tip: export `COMPOSE_FILE=deploy/docker-compose.yml` in the server shell to drop
 
 **Update workflow** on the server: `git pull && docker compose -f deploy/docker-compose.yml restart boardy` — Python code and HTML are bind-mounted, no rebuild. Rebuild image (`up -d --build`) ONLY when `pyproject.toml` / `uv.lock` change.
 
-**State**: `boardy.db` lives in the `boardy_db` named volume (survives image rebuilds); `rulebooks/` is bind-mounted from host; `.env` is bind-mounted read-only. The e5 model is baked into the image.
+**State**: `data/` is bind-mounted into `/data` so `boardy.db` and `telegram_chats.json` are shared with the host repo; `rulebooks/` is bind-mounted from host; `.env` is bind-mounted read-only. The e5 model is baked into the image.
 
 **Cloudflare Tunnel setup** (one-time, on the host that runs Docker):
 1. Cloudflare dashboard → Zero Trust → Networks → Tunnels → Create a tunnel → copy the **token**.

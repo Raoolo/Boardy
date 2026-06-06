@@ -2,8 +2,8 @@
 #
 # This compose file lives in deploy/ — all paths (build context, bind mounts,
 # env_file) are RELATIVE TO THIS FILE, so `..` = repo root. Pinning the
-# project name with `name: boardy` (top-level) keeps the volume always named
-# `boardy_boardy_db` regardless of where compose is invoked from.
+# project name with `name: boardy` (top-level) keeps the compose project name
+# stable regardless of where compose is invoked from.
 #
 # Three services with distinct activation modes (profiles are additive):
 #
@@ -25,8 +25,9 @@
 # rebuilds are needed ONLY when pyproject.toml / uv.lock change.
 #
 # State persistence:
-#   - boardy.db is in a named volume (`boardy_db`). Survives container/image
-#     rebuilds. Backup = `docker compose exec boardy sh -c 'cat /data/boardy.db' > backup.db`.
+#   - data/ is bind-mounted into /data so the app sees the same SQLite file
+#     you already have in the repo (`data/boardy.db`) and Telegram keeps its
+#     `telegram_chats.json` alongside it.
 #   - rulebooks/ is bind-mounted from host (PDFs are bulky, easier to manage
 #     on the host filesystem than inside a volume).
 #   - HF cache is baked in the image (see Dockerfile) — no volume needed.
@@ -41,7 +42,7 @@ services:
     container_name: boardy
     restart: unless-stopped
     env_file: ../.env
-    # Override BOARDY_DB so the app writes to the volume path, not the
+    # Override BOARDY_DB so the app writes to the shared /data mount, not the
     # repo-relative default. The app.db module reads this if set, otherwise
     # falls back to ./data/boardy.db (local-dev path).
     environment:
@@ -52,8 +53,8 @@ services:
       - ../app:/app/app:ro
       - ../etl:/app/etl:ro
       - ../web:/app/web:ro
-      # State: persistent across rebuilds.
-      - boardy_db:/data
+      # State: shared with the host repo `data/` folder.
+      - ../data:/data
       - ../rulebooks:/app/rulebooks
     # Local-only port binding. With the tunnel profile, traffic comes via
     # the cloudflared container over the internal network — 8765 stays
@@ -97,20 +98,18 @@ services:
     environment:
       # Override per il networking interno: il bot trova boardy via DNS docker.
       BOARDY_BASE_URL: http://boardy:8765
-      # Stesso path del DB → telegram_chats.json va nello stesso volume,
+      # Stesso path del DB → telegram_chats.json va nella stessa cartella,
       # cosi' il restart del container non perde la mappatura conv_id.
       BOARDY_DB: /data/boardy.db
     volumes:
       - ../bot:/app/bot:ro
-      - boardy_db:/data
+      - ../data:/data
     depends_on:
       - boardy
     networks:
       - boardy_net
     command: ["python", "-m", "bot.telegram_bot"]
 
-volumes:
-  boardy_db:
 
 networks:
   boardy_net:
