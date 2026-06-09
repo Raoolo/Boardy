@@ -95,8 +95,7 @@ def _chunk_pages(pages: list[tuple[int, str]]) -> list[dict]:
     return chunks
 
 
-def _read_pdf_pages(pdf_path: Path) -> list[tuple[int, str]]:
-    reader = PdfReader(str(pdf_path))
+def _pages_from_reader(reader: PdfReader) -> list[tuple[int, str]]:
     out: list[tuple[int, str]] = []
     for i, page in enumerate(reader.pages, start=1):
         try:
@@ -105,6 +104,37 @@ def _read_pdf_pages(pdf_path: Path) -> list[tuple[int, str]]:
             text = ""
         out.append((i, _clean(text)))
     return out
+
+
+def _read_pdf_pages(pdf_path: Path) -> list[tuple[int, str]]:
+    return _pages_from_reader(PdfReader(str(pdf_path)))
+
+
+# --- game-name resolution -----------------------------------------------------
+# Rulebook tools are often called by the model with a slightly-off name (extra
+# colon, different spacing). Resolve tolerantly so auto + manual flows don't
+# fail on cosmetics: exact LOWER match first, then a normalized fallback.
+
+def _norm_name(s: str) -> str:
+    """Lowercase, drop punctuation, collapse whitespace — for fuzzy name match."""
+    return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+
+def _resolve_game(conn, name: str):
+    """Return the games row matching `name` (exact LOWER, then normalized).
+
+    Returns the sqlite Row (with id, name) or None. Normalized match only
+    accepts an UNAMBIGUOUS hit (exactly one row) to avoid silent mis-targeting.
+    """
+    row = conn.execute(
+        "SELECT id, name FROM games WHERE LOWER(name)=LOWER(?)", (name,)
+    ).fetchone()
+    if row:
+        return row
+    target = _norm_name(name)
+    matches = [r for r in conn.execute("SELECT id, name FROM games").fetchall()
+               if _norm_name(r["name"]) == target]
+    return matches[0] if len(matches) == 1 else None
 
 
 # --- embedding helpers --------------------------------------------------------
@@ -123,23 +153,30 @@ def _embed_query(text: str) -> np.ndarray:
 
 # --- public API ---------------------------------------------------------------
 
-def ingest(game_name: str, pdf_path: str) -> dict:
-    """Parse a PDF rulebook and index it under the matching game."""
-    p = Path(pdf_path).expanduser().resolve()
-    if not p.exists():
-        return {"error": f"file not found: {p}"}
-    if not p.suffix.lower() == ".pdf":
-        return {"error": "expected a .pdf file"}
+def ingest_bytes(game_name: str, data: bytes, *, source: str) -> dict:
+    """Index a rulebook from raw PDF bytes; stores the PDF itself in the DB.
+
+    `source` is a stable handle (file path or origin URL) used for dedup via
+    UNIQUE(game_id, source_path): re-ingesting the same source replaces the row.
+    The bytes are persisted in `rulebooks.pdf_blob` so boardy.db is the single
+    source of truth (no on-disk PDF needed).
+    """
+    import io
+    try:
+        reader = PdfReader(io.BytesIO(data))
+    except Exception as e:
+        return {"error": f"could not parse PDF: {type(e).__name__}: {e}"}
 
     with get_conn() as conn:
-        game = conn.execute("SELECT id FROM games WHERE LOWER(name)=LOWER(?)", (game_name,)).fetchone()
+        game = _resolve_game(conn, game_name)
         if not game:
             return {"error": f"game {game_name!r} not found in DB"}
-        game_id = game["id"]
+        game_id, canonical = game["id"], game["name"]
 
-        pages = _read_pdf_pages(p)
+        pages = _pages_from_reader(reader)
         if not any(t for _, t in pages):
-            return {"error": "no extractable text in PDF (might be scanned image)"}
+            return {"error": "no extractable text in PDF (might be a scanned image — "
+                             "OCR not yet supported)"}
 
         chunks = _chunk_pages(pages)
         if not chunks:
@@ -148,11 +185,11 @@ def ingest(game_name: str, pdf_path: str) -> dict:
         embeddings = _embed_passages([c["text"] for c in chunks])
 
         # Replace any prior rulebook for this game+source
-        conn.execute("DELETE FROM rulebooks WHERE game_id=? AND source_path=?", (game_id, str(p)))
+        conn.execute("DELETE FROM rulebooks WHERE game_id=? AND source_path=?", (game_id, source))
         cur = conn.execute(
-            """INSERT INTO rulebooks(game_id, source_path, page_count, embedding_model)
-               VALUES(?,?,?,?)""",
-            (game_id, str(p), len(pages), EMBED_MODEL_NAME),
+            """INSERT INTO rulebooks(game_id, source_path, page_count, embedding_model, pdf_blob)
+               VALUES(?,?,?,?,?)""",
+            (game_id, source, len(pages), EMBED_MODEL_NAME, data),
         )
         rb_id = cur.lastrowid
         for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
@@ -164,24 +201,58 @@ def ingest(game_name: str, pdf_path: str) -> dict:
         conn.commit()
     return {
         "ok": True,
-        "game": game_name,
+        "game": canonical,
         "rulebook_id": rb_id,
         "pages": len(pages),
         "chunks": len(chunks),
+        "bytes": len(data),
         "model": EMBED_MODEL_NAME,
     }
+
+
+def ingest(game_name: str, pdf_path: str) -> dict:
+    """Parse a local PDF rulebook and index it under the matching game.
+
+    Thin wrapper over `ingest_bytes` — reads the file, then stores its bytes in
+    the DB (the on-disk file is no longer the source of truth, just the input).
+    """
+    p = Path(pdf_path).expanduser().resolve()
+    if not p.exists():
+        return {"error": f"file not found: {p}"}
+    if not p.suffix.lower() == ".pdf":
+        return {"error": "expected a .pdf file"}
+    return ingest_bytes(game_name, p.read_bytes(), source=str(p))
+
+
+def get_pdf(game_name: str) -> tuple[str, bytes] | None:
+    """Return (filename, pdf_bytes) for a game's most-recent stored rulebook, or None."""
+    with get_conn() as conn:
+        game = _resolve_game(conn, game_name)
+        if not game:
+            return None
+        row = conn.execute(
+            """SELECT pdf_blob FROM rulebooks
+               WHERE game_id=? AND pdf_blob IS NOT NULL
+               ORDER BY ingested_at DESC LIMIT 1""",
+            (game["id"],),
+        ).fetchone()
+    if not row or row["pdf_blob"] is None:
+        return None
+    return (f"{_norm_name(game['name']).replace(' ', '-')}.pdf", bytes(row["pdf_blob"]))
 
 
 def search(game_name: str, query: str, k: int = 5) -> list[dict]:
     """Top-k cosine-similar chunks for a given game."""
     with get_conn() as conn:
+        game = _resolve_game(conn, game_name)
+        if not game:
+            return []
         rows = conn.execute(
             """SELECT c.id, c.page_start, c.page_end, c.text, c.embedding
                FROM rulebook_chunks c
                JOIN rulebooks rb ON rb.id = c.rulebook_id
-               JOIN games g ON g.id = rb.game_id
-               WHERE LOWER(g.name) = LOWER(?)""",
-            (game_name,),
+               WHERE rb.game_id = ?""",
+            (game["id"],),
         ).fetchall()
     if not rows:
         return []

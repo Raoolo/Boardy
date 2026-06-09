@@ -140,11 +140,12 @@ RULEBOOKS_DDL = """
 CREATE TABLE IF NOT EXISTS rulebooks (
   id INTEGER PRIMARY KEY,
   game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
-  source_path TEXT,                      -- original PDF path or URL
+  source_path TEXT,                      -- original PDF path or source URL
   language TEXT,
   page_count INTEGER,
   ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   embedding_model TEXT NOT NULL,
+  pdf_blob BLOB,                         -- the raw PDF bytes (v9): single backup artifact
   UNIQUE(game_id, source_path)
 );
 
@@ -312,6 +313,21 @@ def _migrate_v8_friendly_tags(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE games ADD COLUMN friendly_tags TEXT")
 
 
+def _migrate_v9_rulebook_pdf_blob(conn: sqlite3.Connection) -> None:
+    """v9: store the raw PDF bytes inside the DB (`rulebooks.pdf_blob`).
+
+    Decision (2026-06-09): the rulebook PDF lives in SQLite, not on disk, so a
+    single boardy.db backup carries everything (PDF + chunks + embeddings) and
+    is fully portable. The searchable content (chunks + embeddings) was already
+    in the DB; this adds the source artifact so the file is re-exportable.
+    Idempotent — only adds the column when missing. Pre-existing rows keep
+    pdf_blob NULL (their on-disk source is gone after this change; re-ingest to
+    backfill the blob).
+    """
+    if not _has_column(conn, "rulebooks", "pdf_blob"):
+        conn.execute("ALTER TABLE rulebooks ADD COLUMN pdf_blob BLOB")
+
+
 def migrate() -> None:
     with get_conn() as conn:
         # If `games` doesn't exist at all, nothing to do — ETL will create it.
@@ -347,5 +363,8 @@ def migrate() -> None:
 
         # v8: friendly_tags column on games.
         _migrate_v8_friendly_tags(conn)
+
+        # v9: store raw PDF bytes inside rulebooks (DB-as-single-source).
+        _migrate_v9_rulebook_pdf_blob(conn)
 
         conn.commit()

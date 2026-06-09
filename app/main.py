@@ -681,11 +681,10 @@ async def upload_rulebook(
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "expected a .pdf file")
     safe = _safe_filename(file.filename)
-    dest = RULEBOOKS_DIR / safe
     contents = await file.read()
-    dest.write_bytes(contents)
-    result = rb.ingest(game_name, str(dest))
+    # PDF bytes are stored in the DB (boardy.db is the single source of truth) —
+    # we keep the original filename only as the dedup `source` handle.
+    result = rb.ingest_bytes(game_name, contents, source=safe)
     if "error" in result:
-        # keep the file even on ingest error so user can retry / debug
         raise HTTPException(400, result["error"])
-    return {**result, "saved_to": str(dest)}
+    return result

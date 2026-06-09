@@ -27,6 +27,11 @@ dependencies = [
     # Telegram bot (optional client — `uv run python -m bot.telegram_bot`).
     # PTB v21 e' async, gia' batterie incluse (httpx interno per le call API).
     "python-telegram-bot>=21.0",
+    # Headless browser per scaricare i file di BGG (l'URL del PDF e' generato
+    # via JS → serve eseguire il JS). Solo Chromium. Vedi etl/bgg_browser.py.
+    # NB: dopo `uv sync` serve `uv run playwright install chromium` (scarica il
+    # binario del browser, ~150MB, fuori dal pacchetto pip).
+    "playwright>=1.45.0",
 ]
 
 [tool.uv]

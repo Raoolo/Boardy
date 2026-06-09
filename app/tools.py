@@ -333,6 +333,9 @@ def add_game(
     # chat-driven enrichment didn't capture the image URLs.
     _backfill_bgg_media(gid)
     _backfill_friendly_tags(gid)
+    # Auto-fetch the rulebook IFF we find a confident exact-title match online;
+    # ambiguous cases are left for the chat propose-and-confirm flow. Best-effort.
+    _backfill_rulebook(gid)
     return {"ok": True, "id": gid, "name": name}
 
 
@@ -821,7 +824,9 @@ def ask_rules(game_name: str, question: str, k: int = 5) -> dict:
     if not chunks:
         return {
             "error": f"No rulebook ingested for {game_name!r}. "
-                     f"Use `ingest_rulebook` first with a PDF path."
+                     f"Call `find_rulebook` to locate the PDF online, propose it, "
+                     f"and on confirmation `download_rulebook` — or `ingest_rulebook` "
+                     f"for a local file."
         }
     return {"game": game_name, "question": question, "chunks": chunks}
 
@@ -831,6 +836,232 @@ def list_rulebooks() -> dict:
     from . import rulebooks
     items = rulebooks.list_rulebooks()
     return {"count": len(items), "items": items}
+
+
+# --- rulebook discovery + download -------------------------------------------
+# Two sources, complementary:
+#  - 1j1ju.com (etl/onejour_api): direct cdn .pdf links, deterministic, no auth.
+#    Primary because a candidate carries a downloadable URL right away.
+#  - BGG Files (etl/bgg_files_api + etl/bgg_browser): richer/multilingual, the
+#    file LIST is open JSON but the actual download needs a logged-in headless
+#    browser (the file URL is JS-computed + login-gated). A BGG candidate carries
+#    a `bgg_filepageid` instead of a URL → download_rulebook(bgg_filepageid=...).
+# Tavily stays as a last-resort broad .pdf search when both find nothing.
+
+
+def _bgg_candidates(bgg_id: int) -> list[dict]:
+    """Rulebook candidates from BGG Files (no download — just metadata)."""
+    try:
+        from etl import bgg_files_api
+        out = []
+        for f in bgg_files_api.find_rulebooks(int(bgg_id))[:6]:
+            out.append({
+                "title": f["title"] or f["filename"],
+                # download keys on filepageid (≠ fileid) — see bgg_browser
+                "bgg_filepageid": f["filepageid"],
+                "source": "bgg",
+                "lang": f["language"] or "?",
+                "note": f["description"][:60],
+            })
+        return out
+    except Exception:
+        return []
+
+
+def find_rulebook(game_name: str, bgg_id: int | None = None) -> dict:
+    """Find downloadable rulebooks for a game. Does NOT download.
+
+    Returns candidates from 1j1ju (carry `url`) + BGG Files (carry `bgg_filepageid`)
+    for the model to propose to the user. Broad Tavily .pdf search only if both
+    sources are empty. Each candidate has `source` + `lang`.
+    """
+    candidates: list[dict] = []
+
+    # 1j1ju.com deterministic HTML search (direct PDF links)
+    try:
+        from etl import onejour_api
+        for h in onejour_api.search_rulebooks(game_name, limit=6):
+            candidates.append({"title": h["title"], "url": h["url"],
+                               "source": "1j1ju.com", "lang": h["lang"]})
+    except Exception:
+        pass
+
+    # BGG Files (needs bgg_id) — fileid-based, downloaded via browser
+    if bgg_id:
+        candidates += _bgg_candidates(bgg_id)
+
+    if candidates:
+        return {"game": game_name, "count": len(candidates), "candidates": candidates}
+
+    # fallback: broad Tavily web search for direct .pdf links
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        return {"error": "No candidates from 1j1ju / BGG and TAVILY_API_KEY not set. "
+                         "Provide a direct PDF URL or local path instead."}
+    try:
+        from tavily import TavilyClient
+    except ImportError:
+        return {"error": "tavily-python not installed. Run `uv sync`."}
+
+    try:
+        resp = TavilyClient(api_key=api_key).search(
+            query=f"{game_name} rulebook pdf",
+            max_results=10, search_depth="basic",
+            include_answer=False, include_raw_content=False,
+        )
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    from etl import onejour_api  # reuse the same lang heuristic
+    candidates = []
+    for r in resp.get("results", []):
+        url = r.get("url") or ""
+        if not url.lower().endswith(".pdf"):
+            continue
+        candidates.append({
+            "title": r.get("title"),
+            "url": url,
+            "source": url.split("/")[2] if "://" in url else None,
+            "lang": onejour_api.guess_lang(url),
+        })
+    return {"game": game_name, "count": len(candidates),
+            "candidates": candidates[:8], "source": "web"}
+
+
+def _fetch_pdf_bytes(url: str, *, max_bytes: int = 30 * 1024 * 1024) -> dict:
+    """Download `url` and verify it's actually a PDF (magic bytes).
+
+    Mirrors the browser-header / urllib pattern used by etl/syg_api to get past
+    naive WAFs. Returns {ok, data: bytes} or {error}. Does NOT touch disk —
+    callers store the bytes in the DB.
+    """
+    import urllib.request
+    import urllib.error
+
+    req = urllib.request.Request(url, headers={
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0 Safari/537.36"),
+        "Accept": "application/pdf,*/*",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read(max_bytes + 1)
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code} fetching {url}"}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    if len(data) > max_bytes:
+        return {"error": f"file exceeds {max_bytes // (1024*1024)} MB cap"}
+    # magic-byte check beats trusting Content-Type: rejects HTML error pages
+    if not data[:5].startswith(b"%PDF"):
+        return {"error": "downloaded content is not a PDF (no %PDF header) — "
+                         "likely an HTML page, pick a direct .pdf link"}
+    return {"ok": True, "data": data}
+
+
+def download_rulebook(game_name: str, url: str | None = None,
+                      bgg_filepageid: int | None = None, _source: str | None = None) -> dict:
+    """Download a rulebook and index it under `game_name`. Provide EITHER `url`
+    (a direct .pdf, e.g. a 1j1ju candidate) OR `bgg_filepageid` (a BGG Files
+    candidate — fetched via headless browser + BGG login).
+
+    One confirmed action = download + ingest (propose first, then on the user's
+    OK). The PDF bytes go into the DB (no on-disk file). The game must exist.
+    Use `ingest_rulebook` for a local file.
+    """
+    from . import rulebooks
+
+    if bgg_filepageid:
+        from etl.bgg_browser import fetch_one
+        r = fetch_one(int(bgg_filepageid))
+        if "error" in r:
+            return {"error": r["error"], "bgg_filepageid": bgg_filepageid}
+        result = rulebooks.ingest_bytes(game_name, r["data"], source=f"bgg:filepage/{bgg_filepageid}")
+        result["bgg_filepageid"] = bgg_filepageid
+        return result
+
+    if not url:
+        return {"error": "provide either url or bgg_filepageid"}
+    dl = _fetch_pdf_bytes(url)
+    if "error" in dl:
+        return dl
+    # source=url → re-download replaces the row via UNIQUE(game_id, source_path)
+    result = rulebooks.ingest_bytes(game_name, dl["data"], source=url)
+    result["url"] = url
+    return result
+
+
+# Words that trail a rulebook title on 1j1ju ("Dune: Imperium Rulebook",
+# "Catane Junior Règle") — stripped before comparing the title to the game name.
+_RULEBOOK_WORDS = {
+    "rulebook", "rules", "rule", "rulesheet", "regle", "regles", "regole",
+    "regolamento", "anleitung", "regeln", "spielregeln", "reglas", "regras",
+    "instructions", "istruzioni",
+}
+
+
+def _rulebook_core(title: str) -> str:
+    """Normalized title with trailing rulebook-words removed, for match scoring."""
+    import re
+    toks = [t for t in re.sub(r"[^a-z0-9]+", " ", title.lower()).split()
+            if t not in _RULEBOOK_WORDS]
+    return " ".join(toks)
+
+
+def _backfill_rulebook(game_id: int) -> bool:
+    """Post-commit hook: auto-fetch a rulebook for a freshly added game IFF a
+    confident match exists; otherwise do nothing (the chat flow will propose).
+
+    Tries 1j1ju first (fast, no browser): a candidate whose title (minus
+    rulebook-words) normalizes EXACTLY to the game name. If none, and the game
+    has a bgg_id and the browser is enabled, tries BGG Files (headless browser)
+    taking the top rulebook only when its score is high (EN/strong keyword).
+    Best-effort: every failure is swallowed so it never blocks `add_game`.
+    Skips if the game already has a rulebook.
+    """
+    try:
+        from . import rulebooks
+        from etl import onejour_api
+
+        with get_conn() as conn:
+            row = conn.execute("SELECT name, bgg_id FROM games WHERE id=?", (game_id,)).fetchone()
+            if not row:
+                return False
+            name, bgg_id = row["name"], row["bgg_id"]
+            already = conn.execute(
+                "SELECT 1 FROM rulebooks WHERE game_id=? LIMIT 1", (game_id,)
+            ).fetchone()
+        if already:
+            return False
+
+        # 1) 1j1ju strong exact-title match
+        target = rulebooks._norm_name(name)
+        strong = [h for h in onejour_api.search_rulebooks(name, limit=8)
+                  if _rulebook_core(h["title"]) == target]
+        if strong:
+            strong.sort(key=lambda h: (h["lang"] != "EN", len(h["title"])))
+            dl = _fetch_pdf_bytes(strong[0]["url"])
+            if "error" not in dl:
+                res = rulebooks.ingest_bytes(name, dl["data"], source=strong[0]["url"])
+                if res.get("ok"):
+                    return True
+
+        # 2) BGG Files fallback (headless browser) — only a high-confidence top hit
+        if bgg_id and os.environ.get("BGG_BROWSER_ENABLED", "1") != "0":
+            from etl import bgg_files_api
+            cands = bgg_files_api.find_rulebooks(int(bgg_id))
+            if cands and cands[0]["score"] >= 2.0:  # EN + strong rulebook keyword
+                from etl.bgg_browser import fetch_one
+                r = fetch_one(cands[0]["filepageid"])
+                if "data" in r:
+                    res = rulebooks.ingest_bytes(
+                        name, r["data"], source=f"bgg:filepage/{cands[0]['filepageid']}")
+                    return bool(res.get("ok"))
+        return False
+    except Exception:
+        return False
 
 
 def web_search(query: str, include_domains: list[str] | None = None,
@@ -1616,6 +1847,44 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "find_rulebook",
+        "description": (
+            "Find downloadable rulebooks for a game from 1j1ju.com (candidates "
+            "carry a direct `url`) and BoardGameGeek Files (candidates carry a "
+            "`bgg_filepageid`). Pass `bgg_id` to include the richer/multilingual "
+            "BGG results. Does NOT download — propose the best candidate in a table "
+            "(file, source, language) and wait for confirmation, then call "
+            "`download_rulebook` with the candidate's `url` OR `bgg_filepageid`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "game_name": {"type": "string", "description": "Prefer the ENGLISH title — the sites index English names."},
+                "bgg_id":    {"type": "integer", "description": "BGG id — include it to also search BGG Files."},
+            },
+            "required": ["game_name"],
+        },
+    },
+    {
+        "name": "download_rulebook",
+        "description": (
+            "Download a rulebook and index it (download + ingest in one step). "
+            "Provide EITHER `url` (a 1j1ju/web direct .pdf) OR `bgg_filepageid` (a "
+            "BGG Files candidate — fetched via headless browser + BGG login). The game "
+            "must already exist. Call ONLY after the user confirmed the candidate "
+            "from `find_rulebook`. For a local file use `ingest_rulebook`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "game_name":  {"type": "string"},
+                "url":            {"type": "string", "description": "Direct link to a .pdf (1j1ju/web candidate)."},
+                "bgg_filepageid": {"type": "integer", "description": "BGG Files filepage id (bgg candidate)."},
+            },
+            "required": ["game_name"],
+        },
+    },
+    {
         "name": "search_games_semantic",
         "description": (
             "Semantic 'vibe' search over the user's owned games using "
@@ -1913,6 +2182,8 @@ TOOL_FUNCS = {
     "ingest_rulebook":         ingest_rulebook,
     "ask_rules":               ask_rules,
     "list_rulebooks":          list_rulebooks,
+    "find_rulebook":           find_rulebook,
+    "download_rulebook":       download_rulebook,
     "bgg_search":              bgg_search,
     "bgg_lookup":              bgg_lookup,
     "sleeve_lookup":           sleeve_lookup,
@@ -1940,4 +2211,5 @@ WRITE_TOOLS: set[str] = {
     "mark_as_owned",
     "remove_from_wishlist",
     "ingest_rulebook",
+    "download_rulebook",
 }

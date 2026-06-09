@@ -220,8 +220,14 @@ Rules questions during a game (CRITICAL):
   Cite the page numbers naturally: "Sì, puoi attaccare un esagono vuoto (p. 12)."
 - If the excerpts don't cover the question, say so plainly: "Il regolamento indicizzato
   non copre questo punto chiaramente — controlla manualmente p. X o aggiungi più pagine."
-- If `ask_rules` returns an error ("no rulebook ingested"), tell the user to provide
-  the PDF path and call `ingest_rulebook(game_name, pdf_path)` for them.
+- If `ask_rules` returns an error ("no rulebook ingested"), DON'T give up: call
+  `find_rulebook(game_name, bgg_id=...)` (ENGLISH title; pass the bgg_id so it also
+  searches BoardGameGeek Files). Candidates come from 1j1ju (carry `url`) and BGG
+  (carry `bgg_filepageid`). Propose the best one in a compact table (file/title, source,
+  language) and WAIT for the user's "sì". On confirmation call `download_rulebook`
+  with that candidate's `url` OR `bgg_filepageid`, then re-run `ask_rules` and answer
+  with the page citation. If nothing is found, ask the user for a direct PDF URL or
+  a local path (`ingest_rulebook`).
 
 Citation formatting (in case you cite an external source):
 - ABSOLUTELY FORBIDDEN: "Fonti:", "Sources:", "Riferimenti:" sections, footnote

@@ -84,6 +84,15 @@ COPY --from=builder --chown=boardy:boardy /opt/hf-cache /home/boardy/.cache/hugg
 # inside the venv resolve correctly (uv writes `pyproject.toml` references).
 COPY --chown=boardy:boardy pyproject.toml ./
 
+# Headless Chromium for BGG file downloads (etl/bgg_browser.py). `--with-deps`
+# apt-installs the shared libs Chromium needs at runtime — must run in THIS
+# (runtime) stage, not the builder, since those libs have to be in the final
+# image. Browser binary lives in a shared path readable by the boardy user.
+# Adds ~400MB. Run as root (apt), then hand ownership to boardy.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN /app/.venv/bin/python -m playwright install --with-deps chromium && \
+    chown -R boardy:boardy /opt/ms-playwright
+
 # Put venv on PATH so `uvicorn` etc. resolve without `.venv/bin/` prefix.
 ENV PATH="/app/.venv/bin:${PATH}" \
     HF_HOME=/home/boardy/.cache/huggingface \

@@ -4,7 +4,14 @@ Actionable backlog. When the user asks "what's next?", read top-down and propose
 the highest-priority unticked item with the trade-off in 2–3 sentences.
 For long-form rationale see `secondbrain/memo-boardy-future.md`.
 
+## 🟡 Rimasto aperto da "BGG Files 2ª fonte"
+
+- [ ] **Verifica Docker ARM con Chromium** (rimandato 2026-06-09: Docker non installato in locale + VM Oracle ARM non ancora provisionata). Quando la A1 è in piedi: `docker compose -f deploy/docker-compose.yml up -d --build` → controlla che il layer `playwright install --with-deps chromium` builda su aarch64 e che un download BGG funzioni nel container (RAM/1-OCPU). Il Dockerfile è già pronto (`PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`, install in runtime stage come root).
+- [ ] *(nice-to-have)* Filtro relevance sui candidati 1j1ju: per giochi assenti ritorna fuzzy-junk (Elfenland→Wolfenstein) e il modello sceglie dal titolo.
+
 ## ✅ Done
+
+- [x] **BGG Files come 2ª fonte regolamenti** (2026-06-09): download via headless browser (Playwright + login BGG). `etl/bgg_files_api.py` (discovery JSON aperta) + `etl/bgg_browser.py` (`BGGSession` riusabile, login una volta per batch, intercetta la risposta `downloadurls` e scarica l'URL hash). Integrato in `find_rulebook` (merge 1j1ju+BGG), `download_rulebook(bgg_filepageid=...)`, hook `_backfill_rulebook` (gate `BGG_BROWSER_ENABLED`, score≥2.0), `backfill_rulebooks.py --source {1j1ju,bgg,both}`. Env `BGG_USERNAME`/`BGG_PASSWORD`. **Bug chiave risolto: `fileid` ≠ `filepageid`** — la filepage chiave sul filepageid, navigare per fileid dà 404 (vedi LEARNINGS 2026-06-09 sera). Copertura regolamenti 36 → **45/58 posseduti**. Limite residuo: PDF scansionati (Annunaki) → servirebbe OCR.
 - [x] ETL: parse `1) ElencoGiochi.xlsx` → SQLite, regex-split the messy SLEEVE column.
 - [x] FastAPI + Anthropic tool-use chat (Sonnet 4.6 default).
 - [x] Server-side conversation persistence + dropdown switcher in UI.
@@ -12,6 +19,9 @@ For long-form rationale see `secondbrain/memo-boardy-future.md`.
 - [x] Web search: client-side `web_search` tool (Tavily) with trusted-domain allowlist — provider-agnostic.
 - [x] `add_game` / `update_game` / `delete_game` / `set_sleeve_requirements` tools with user-confirmation flow.
 - [x] Rulebook RAG: pypdf parsing, local sentence-transformers embeddings, brute-force cosine search, page-cited answers.
+- [x] Rulebook auto-fetch (2026-06-09): `find_rulebook` (read, 1j1ju via `etl/onejour_api` + Tavily fallback) → `download_rulebook` (write, scarica+indicizza, valida `%PDF`) → `ask_rules`. UX proponi-e-conferma. Chiude la catena find→download→ingest→ask senza più passare il PDF a mano.
+- [x] Rulebook storage in DB (schema v9, 2026-06-09): PDF grezzo in `rulebooks.pdf_blob` (`ingest_bytes` core, `get_pdf` export). Backup unico/portabile. Niente più scrittura su `rulebooks/`.
+- [x] Auto-fetch rulebook su nuovo gioco (2026-06-09): hook `_backfill_rulebook` post-`add_game`, scarica solo su match esatto del titolo (altrimenti la chat propone). Resolver nome tollerante in `rulebooks._resolve_game`.
 - [x] Drag-and-drop PDF upload with autocomplete game picker.
 - [x] BGG backfill script (`etl/backfill_bgg.py`) using Haiku 4.5.
 - [x] BGG backfill v2 via official XML API2 (`etl/bgg_api.py` + `etl/backfill_v2.py`). Awaits BGG token to run.

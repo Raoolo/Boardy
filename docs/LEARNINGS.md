@@ -12,6 +12,53 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-06-09 (sera) — BGG Files download: `fileid` ≠ `filepageid` (il bug del 404)
+
+**Sintomo.** Batch di download BGG Files: 2 file su 9 funzionavano (Vampiri, Barrage), gli altri 7 fallivano *sempre* con `BGGBrowserError: could not download` — anche con retry+backoff. Non era rate-limiting (il pattern non era "i primi N falliscono"): erano sempre gli **stessi** fileid a fallire.
+
+**Causa.** L'API Files di BGG (`api.geekdo.com/api/files`) espone per ogni file **due** id distinti: `fileid` e `filepageid`, **e sono diversi** (es. Secret Hitler: fileid=156161, filepageid=125456). La filepage `/filepage/<id>/<slug>` — quella che `bgg_browser` naviga per far girare il JS e intercettare `downloadurls` — chiave su **`filepageid`**, non `fileid`. Navigare `/filepage/<fileid>/x` dà **404** → nessuna XHR `downloadurls` parte → download fallisce. I 2 che funzionavano erano casi in cui BGG risolveva *anche* per fileid (incoerente). Il valore canonico è il `filepageid` (è quello nel campo `href` del JSON: `/filepage/125456/secret-hitler-rules-pdf`).
+
+**Fix.** `etl/bgg_files_api._parse_file` ora espone **entrambi** (`fileid` + `filepageid`). Tutto il resto della pipeline di download usa il **`filepageid`**: `bgg_browser.download/fetch_one(filepageid)`, il tool `download_rulebook(bgg_filepageid=...)` (param + schema rinominati), `find_rulebook`/`_bgg_candidates` (candidati portano `bgg_filepageid`), `_backfill_rulebook`, `etl/backfill_rulebooks.py` (chiave dict + `.download()`), e il system prompt. Source string DB: `bgg:filepage/<id>`. Lezione generale: quando un'API espone più id per la stessa entità, **non assumere quale serve all'URL** — controlla il campo `href` autorevole.
+
+**Stato finale dei download BGG (9 indicizzati).** Echoes Of Time, SETI, Secret Hitler, Splendor (Sun Never Sets + Silk Road), Blackout HK, Vampiri Heritage, Barrage (Final Rulebook fid 242312, non il Pre-Draft top), Elfenland De Luxe. **Copertura regolamenti: 36 → 45/58 posseduti.** Falliti per scelta/limite: **Annunaki** ("Core Game Rulebook" = PDF **scansionato**, 0 testo → no OCR), HeroQuest/Monolyth/Duel-Agora/Tesla/Hamlet/Sagrada (solo homebrew/summary/lingua errata in cima → skippati), + i `none` (D&D set, Tortelli, Andor, Schonbrunn). Per i giochi col top-candidate sbagliato il backfill auto-prende comunque il top: per quelli vanno scaricati col `filepageid` mirato (come fatto per Barrage/Blackout).
+
+---
+
+## 2026-06-09 — Rulebook auto-fetch: 1j1ju beats both Tavily e BGG Files
+
+**Contesto.** La pipeline RAG dei regolamenti (`ingest_rulebook`/`ask_rules`/`list_rulebooks`) esisteva ma pretendeva il PDF già su disco. Aggiunti `find_rulebook` (read) + `download_rulebook` (write) per chiudere la catena find→download→ingest→ask, con UX proponi-e-conferma.
+
+**Fonte PDF — cosa funziona e cosa no:**
+- **BGG Files: scartato.** L'XML API2 NON espone la sezione Files; la pagina web è Cloudflare/cookie-walled (WebFetch → 403, coerente coi learning sullo scraping BGG). Un crawler dovrebbe battere Cloudflare → costo alto, resa incerta.
+- **Tavily su 1j1ju: inaffidabile.** `include_domains=["1j1ju.com","cdn.1j1ju.com"]` ritorna quasi zero `.pdf` (Tavily indicizza malissimo cdn.1j1ju.com). Diverso dal WebSearch generico che invece li trovava — ma quello non è disponibile a runtime nell'app.
+- **1j1ju endpoint diretto: vincente.** La search on-site è JS/AJAX (i param GET su `/rules?search=` sono ignorati), MA l'autocomplete che la guida — `GET /rules/search?q=Q` — ritorna HTML con i link PDF diretti `cdn.1j1ju.com` negli anchor `<a class="dark-link" href="...pdf" title="...">`. Deterministico, gratis, ~4700 regolamenti multilingua. Wrapper isolato in `etl/onejour_api.py` (stile `bgg_api`/`syg_api`: cache su disco, rate-limit, header browser, parse via regex). Lingua dedotta dal suffisso filename (`-rulebook`→EN, `-regle`→FR, `-regole`→IT, ...). Tavily resta solo come fallback `.pdf` generico quando 1j1ju dà vuoto.
+
+**Robustezza download.** `download_rulebook` valida i **magic bytes `%PDF`** (non si fida del Content-Type) → rifiuta pagine HTML scambiate per PDF; cap 30 MB. Smoke test OK: Dune Imperium → 20 pagine, 45 chunk, `ask_rules('conflitto')` (domanda IT su rulebook EN) → p.12 score 0.81. **Cross-lingual confermato**: e5-base interroga in IT su testo EN senza problemi → non serve scaricare il regolamento nella lingua dell'utente.
+
+**Storage PDF: dentro SQLite (schema v9, `rulebooks.pdf_blob`).** Decisione utente: il PDF grezzo vive nel DB, non su disco → un solo `boardy.db` come backup porta tutto (PDF + chunk + embedding), portabile. Refactor: `rulebooks.ingest_bytes(game_name, data, source=...)` è il core (parse da `BytesIO`, salva blob + chunk); `ingest(path)` legge il file e delega; `download_rulebook`/`upload_rulebook`(REST)/auto-hook passano i bytes direttamente → **niente più scrittura su `rulebooks/`**. `get_pdf(name)` ri-estrae i bytes per un eventuale export. Le righe pre-v9 hanno `pdf_blob` NULL (ri-ingerire per riempirlo). Gli embedding erano già in DB (`rulebook_chunks.embedding`, float32 BLOB), quindi il vero contenuto ricercabile non è cambiato.
+
+**Risoluzione nome tollerante (`rulebooks._resolve_game`).** Il match era `LOWER(name)=LOWER(?)` esatto → falliva su cosmetici ("Dune: Imperium" vs "Dune Imperium"). Ora: exact LOWER → fallback normalizzato (`_norm_name`: lower, punteggiatura→spazi, collapse) che accetta solo match **non ambiguo** (una sola riga). Usato sia da `ingest` sia da `search`, così download/ask non si rompono per un due-punti. Nel flusso auto invece il problema non esiste: l'hook lavora sull'`id`.
+
+**Auto-fetch su nuovo gioco (`_backfill_rulebook`, post-`add_game`).** Scelta utente "auto se match certo, altrimenti proponi". L'hook (best-effort, come `_backfill_bgg_media`) cerca su 1j1ju e scarica SOLO se un candidato, tolte le parole-regolamento dal titolo (`_rulebook_core`: rulebook/rules/regle/regole/anleitung/...), normalizza **esattamente** al nome del gioco → esclude espansioni ("Catan Explorers Pirates" ≠ "catan") e omonimi; tra i pari preferisce EN poi il titolo più corto. Se nessun match esatto → non fa nulla (la chat proporrà). Salta se il gioco ha già un rulebook. Conseguenza voluta: giochi con nome **italiano** in DB ("I Coloni di Catan") non scattano in auto (nessun match esatto su titoli EN) → li gestisce la chat col titolo inglese. Test: Azul/Barrage/Spirit Island/HeroQuest ecc. → 11 match certi su 57 giochi, punteggiatura gestita ("Gloomhaven - Jaws of the Lion" ↔ "Gloomhaven: Jaws of the Lion").
+
+---
+
+## 2026-06-09 — BGG Files: come scaricarli (il "cookie-wall" era un mito)
+
+Scoperta costosa, da non ri-derivare. **(a) Elencare i file di un gioco è APERTO**: `GET https://api.geekdo.com/api/files?objectid=<bggid>&objecttype=thing&showcount=50&pageid=1&sort=hot` → JSON con `fileid`, `filename`, `description` ("Rulebook in English"), `language`, `downloadCount`, `numpositive`. `api.geekdo.com` NON è dietro Cloudflare. Il per-file `/api/file/<id>` dà metadati ma NON l'URL di download. **(b) Scaricare richiede browser + login**: l'URL del file è hash-based e generato da JS. La filepage `/filepage/<id>/<slug>` (slug fittizio ok) fa una XHR a `https://api.geekdo.com/api/file/downloadurls?ids=<id>` con header `Authorization: GeekAuth <token>` (token in-page, non in cookie) → risposta `{"downloadUrls":[{"id","url":"/file/download_redirect/<hash>/<file>"}]}`. L'endpoint è **403 da sloggati** (anche per l'app ufficiale). Soluzione (`etl/bgg_browser.py`): Playwright headless, login via `context.request.post(/login/api/v1, {credentials:{username,password}})`, naviga la filepage e **intercetta la risposta** `downloadurls` (così non devo replicare l'header GeekAuth), poi scarico l'URL hash con `context.request` (eredita CF-clearance + sessione). Verificato: fid 3539 → 2.39MB PDF. Cose che NON funzionano (provate tutte): urllib/curl con header+TLS browser, XHR header, Bearer `BGG_API_TOKEN` (vale solo per l'XML API), cloudscraper/curl_cffi (il blocco non è il fingerprint — le pagine danno 200 — ma la generazione JS dell'URL + il login-gating). `geekfile_download_redirect.php` = 404 (deprecato). **Stato implementazione: vedi `## 🚧 IN CORSO` in docs/TODO.md.**
+
+---
+
+## 2026-06-09 — Backfill rulebooks: 36/58 coperti, scoperti bgg_id errati
+
+**Run.** `etl/backfill_rulebooks.py --apply --level likely` su 56 giochi posseduti senza regolamento → **33 indicizzati** al primo giro (+ Dune già presente). Risoluzione nome **inglese via BGG** essenziale: i titoli 1j1ju sono EN, i nomi DC spesso IT ("I Coloni di Catan" → "Catan"). Classificazione match: `strong` (titolo normalizzato == nome, tolte parole-regolamento) = affidabile; `likely` (subset token) = da rivedere (sottotitoli/edizioni); `weak` = quasi sempre gioco diverso (non su 1j1ju, la ricerca fa fuzzy-fallback su roba a caso).
+
+**bgg_id errati in DB (dato pre-esistente) smascherati dal backfill.** La risoluzione del nome EN ha rivelato 3 righe col `bgg_id` che puntava al gioco SBAGLIATO → metadati inquinati (descrizione/peso/tag di un altro gioco): `I Coloni di Catan Mercanti e Barbari`=36218(**Dominion**)→27760; `Duel - Agora`=284378(**Kanban EV**)→309116; `Room-25 - Ultimate`=332366(**Magnytour**)→212956. Fix: `bgg_lookup(id_corretto)` + `update_game(**metadati)` → corregge id E rinfresca i metadati in un colpo (ri-embedda descrizione + rigenera friendly_tags). Lezione: un bgg_id sbagliato non si vede finché non incroci una fonte esterna sul nome — vale la pena un check periodico nome-DB vs `_bgg_name`.
+
+**Limiti 1j1ju (restano manuali).** (a) **PDF scansionati** (immagine, 0 testo): Barrage, HeroQuest → `ingest` rifiuta ("no extractable text"), servono OCR o un PDF text-based alternativo. (b) **Non presenti su 1j1ju**: giochi troppo nuovi (SETI), espansioni fan-made (Splendor "Sun Never Sets"/"Silk Road"), titoli di nicchia/parodia, e alcuni mainstream che semplicemente non ci sono (7 Wonders Duel: Agora, Elfenland, Secret Hitler) — verificato interrogando 1j1ju diretto: ritorna giochi non correlati = assente. Per questi: `web_search` fallback o URL/PDF manuale via `download_rulebook`/`ingest_rulebook`. Stato finale: **36/58 posseduti con regolamento**.
+
+---
+
 ## 2026-06-05 — Deploy ARM (Oracle Cloud): torch CPU-only + auto-find capacity
 
 **Contesto.** Avvio fase esecutiva del deploy su **Oracle Cloud Always Free ARM** (Ampere A1, fino 4 OCPU/24GB, gratis *per sempre* — non il Free Trial da 30gg). Due lavori tecnici preparati da locale prima di avere la VM.

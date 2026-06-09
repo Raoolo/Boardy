@@ -17,6 +17,8 @@ rulebooks/*.PDF
 etl/unparsed.txt
 etl/.bgg_cache/
 etl/.syg_cache/
+etl/.onejour_cache/
+etl/.bgg_files_cache/
 
 # Python
 __pycache__/
