@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File 'C:\\Users\\ra.gatto\\OneDrive - Reply\\Documents\\Personal\\Boardy\\.codex\\hooks\\check-doc-drift.ps1'"
+          }
+        ]
+      }
+    ]
+  }
+}
