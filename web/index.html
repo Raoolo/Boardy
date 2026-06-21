@@ -45,6 +45,20 @@
   nav a:hover { color: var(--accent); border-color: var(--accent); }
   nav a.active { color: var(--accent); border-color: var(--accent); }
 
+  /* Quick "Nuova chat" in the topbar (right side), besides the sidebar one.
+     Accent pill so it stands out as the primary action. Owner-only. */
+  .newchat-top {
+    background: var(--accent-dim); color: var(--fg);
+    border: 1px solid var(--accent); border-radius: 8px;
+    padding: 6px 12px; font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: inherit; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 5px;
+    transition: background 150ms ease, color 150ms ease;
+  }
+  .newchat-top:hover { background: var(--accent); color: #0f1115; }
+  .newchat-top .plus { font-size: 16px; line-height: 1; }
+  body.guest-mode .newchat-top { display: none; }
+
   /* BGG attribution — required by XML API ToU for public-facing apps.
      Whisper-quiet: no border, transparent bg, low opacity, small logo. */
   footer.bgg-attr {
@@ -244,6 +258,17 @@
     box-shadow: 0 2px 8px rgba(95, 184, 120, 0.25);
   }
   .splash-chip:active { transform: translateY(0); }
+  /* Splash exit: when the first message is sent, the empty-state (title +
+     example chips) fades up and out instead of vanishing abruptly. The JS
+     adds .leaving, then removes the node on animationend. */
+  .splash.leaving {
+    animation: splash-out 260ms ease forwards;
+    pointer-events: none;
+  }
+  @keyframes splash-out {
+    from { opacity: 1; transform: translateY(0); }
+    to   { opacity: 0; transform: translateY(-10px); }
+  }
   @media (max-width: 540px) {
     .splash-chips { grid-template-columns: 1fr; }
   }
@@ -347,6 +372,8 @@
     nav { order: 10; flex-basis: 100%; gap: 6px; }
     nav a { font-size: 12px; padding: 5px 9px; }
     header .spacer { order: 5; }
+    .newchat-top { order: 6; padding: 6px 10px; }
+    .newchat-top .lbl { display: none; }   /* solo "+" su mobile */
     .auth-badge { order: 6; }
 
     .layout { position: relative; }
@@ -394,6 +421,9 @@
     <a href="/wishlist">Wishlist</a>
   </nav>
   <span class="spacer"></span>
+  <button class="newchat-top" id="newBtnTop" title="Nuova chat">
+    <span class="plus">+</span><span class="lbl">Nuova chat</span>
+  </button>
 </header>
 <!-- Banner guest e badge auth sono iniettati da web/static/auth.js. -->
 <script src="/static/auth.js"></script>
@@ -460,6 +490,7 @@
   const btn = document.getElementById('b');
   const convList = document.getElementById('convList');
   const newBtn = document.getElementById('newBtn');
+  const newBtnTop = document.getElementById('newBtnTop');
   const layout = document.getElementById('layout');
   const sidebarToggle = document.getElementById('sidebarToggle');
   const sidebarBackdrop = document.getElementById('sidebarBackdrop');
@@ -732,6 +763,8 @@
     rerender();
     input.focus();
   });
+  // Topbar "Nuova chat" reuses the sidebar button's full logic.
+  newBtnTop.addEventListener('click', () => newBtn.click());
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -739,6 +772,13 @@
     if (!message) return;
     input.value = '';
     btn.disabled = true;
+    // Fade out the empty-state splash (title + example chips) on the first
+    // message of a chat, then remove it once the animation ends.
+    const splashEl = chat.querySelector('.splash');
+    if (splashEl && !splashEl.classList.contains('leaving')) {
+      splashEl.classList.add('leaving');
+      splashEl.addEventListener('animationend', () => splashEl.remove(), { once: true });
+    }
     addBubble(message, 'user');
     // Typing indicator: empty bubble with three pulsing dots driven by CSS.
     // Build the DOM directly so the spans aren't fed through marked.parse.
