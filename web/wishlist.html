@@ -339,7 +339,11 @@
      Logo + badge auth sulla prima riga, nav sezioni su riga propria a tutta
      larghezza. Filtri impilati, tabella scrollabile, dock chat compatto,
      input a 16px (no auto-zoom iOS). */
+  /* Desktop: titolo completo. Mobile: versione corta (vedi media query). */
+  .page-short { display: none; }
   @media (max-width: 640px) {
+    .page-full { display: none; }
+    .page-short { display: inline; }
     header { padding: 10px 14px; gap: 8px 12px; }
     h1 { font-size: 17px; }
     nav { order: 10; flex-basis: 100%; gap: 6px; }
@@ -361,7 +365,7 @@
 </head>
 <body>
 <header>
-  <h1>Bo<span class="accent">ardy</span> · Lista desideri</h1>
+  <h1>Bo<span class="accent">ardy</span> · <span class="page-full">Lista desideri</span><span class="page-short">Wishlist</span></h1>
   <nav>
     <a href="/">Chat</a>
     <a href="/library">Libreria</a>
