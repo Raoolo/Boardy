@@ -533,6 +533,34 @@ def sleeve_summary() -> dict:
     return {"count": len(items), "items": items}
 
 
+def sleeve_games_detail(status: str = "owned") -> dict:
+    """Per-size breakdown of WHICH games need that sleeve size and HOW MANY
+    cards each. Keyed by `(width_mm, height_mm)` tuple → list of
+    `{name, count}` (already sorted by game name).
+
+    NOT a registered LLM tool — it feeds the /sleeves dashboard popup so the
+    user can hover a size and see "Wingspan: 170, Azul: 100" instead of just
+    a flat list of names. `sleeve_summary` keeps returning the compact
+    GROUP_CONCAT string for the model; this is display-only detail.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT sr.width_mm, sr.height_mm, g.name, sr.count
+            FROM sleeve_requirements sr JOIN games g ON g.id=sr.game_id
+            WHERE g.status=?
+            ORDER BY g.name
+            """,
+            (status,),
+        ).fetchall()
+    by_size: dict[tuple, list[dict]] = {}
+    for r in rows:
+        by_size.setdefault((r["width_mm"], r["height_mm"]), []).append(
+            {"name": r["name"], "count": r["count"]}
+        )
+    return by_size
+
+
 def games_ready_to_sleeve() -> dict:
     """Owned games with `sleeve_status='to_sleeve'` whose ENTIRE requirement
     list is covered by current sleeve_inventory. Returns:

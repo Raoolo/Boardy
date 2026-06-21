@@ -441,6 +441,8 @@ def sleeves_data() -> dict:
     inventory = tools_mod.list_inventory()["items"]
     wishlist_preview = tools_mod.sleeve_summary_wishlist()["items"]
     ready_payload = tools_mod.games_ready_to_sleeve()
+    owned_detail = tools_mod.sleeve_games_detail("owned")
+    wish_detail = tools_mod.sleeve_games_detail("wishlist")
 
     def _label(w: float, h: float) -> str:
         # 63.5 → "63.5", 88 → "88" (drop trailing .0). Keeps display compact.
@@ -452,16 +454,62 @@ def sleeves_data() -> dict:
         {**r, "size": _label(r["width_mm"], r["height_mm"])}
         for r in summary
     ]
-    to_buy = [r for r in summary_decorated if r["to_buy"] > 0]
 
     inv_with_id = [
         {**r, "size": _label(r["width_mm"], r["height_mm"])}
         for r in inventory
     ]
-    # Decorate wishlist preview rows with the same `size` label format + an
-    # `already_covered` flag (true if the user has any inventory for this
-    # size already — helps surface "this size you don't even have yet").
-    inv_sizes = {(r["width_mm"], r["height_mm"]) for r in inventory if r["count_owned"] > 0}
+    # Inventory owned-count per size — used both for the "mai comprata" tag
+    # (owned == 0) and to fill the `owned` column of wishlist-only rows.
+    inv_owned: dict[tuple, int] = {}
+    for r in inventory:
+        key = (r["width_mm"], r["height_mm"])
+        inv_owned[key] = inv_owned.get(key, 0) + (r["count_owned"] or 0)
+
+    def _games_detail(key: tuple) -> list[dict]:
+        # Merge owned + wishlist contributors for the popup. Owned games first,
+        # wishlist games tagged owned=False so the UI can mark "non lo possiedi".
+        return (
+            [{**g, "owned": True} for g in owned_detail.get(key, [])]
+            + [{**g, "owned": False} for g in wish_detail.get(key, [])]
+        )
+
+    # Unified "Da comprare" table: keyed by size, includes a row whenever there
+    # is owned shortfall (to_buy>0) OR future (wishlist) demand for that size.
+    # This folds the old separate "Buste future" section in as a column.
+    to_buy: list[dict] = []
+    seen: set = set()
+    for r in summary_decorated:
+        key = (r["width_mm"], r["height_mm"])
+        future = wish_detail.get(key, [])
+        if r["to_buy"] > 0 or future:
+            to_buy.append({
+                **r,
+                "future_count": len(future),
+                "future_needed": sum(g["count"] for g in future),
+                "games_detail": _games_detail(key),
+            })
+            seen.add(key)
+    # Sizes wanted ONLY by wishlist games (no owned requirement at all): they
+    # never appear in `summary`, so add them with to_buy=0 / needed=0.
+    for key, future in wish_detail.items():
+        if key in seen:
+            continue
+        w, h = key
+        to_buy.append({
+            "width_mm": w, "height_mm": h, "size": _label(w, h),
+            "needed": 0, "owned": inv_owned.get(key, 0), "to_buy": 0,
+            "games": "",
+            "future_count": len(future),
+            "future_needed": sum(g["count"] for g in future),
+            "games_detail": _games_detail(key),
+        })
+    # Order: real shortfalls first (most to_buy on top), then future-only rows.
+    to_buy.sort(key=lambda r: (r["to_buy"], r["future_needed"]), reverse=True)
+
+    # Kept for backward-compat / the chat tool; the page no longer renders a
+    # separate "Buste future" section (folded into `to_buy` above).
+    inv_sizes = {k for k, v in inv_owned.items() if v > 0}
     wishlist_decorated = [
         {**r, "size": _label(r["width_mm"], r["height_mm"]),
          "already_covered": (r["width_mm"], r["height_mm"]) in inv_sizes}

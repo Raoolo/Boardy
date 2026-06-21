@@ -62,11 +62,18 @@
   }
   h2 .muted-suffix { font-size: 13px; color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; margin-left: 8px; }
 
-  /* KPI cards */
-  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  /* KPI cards — single row on desktop (flex, no wrap, equal share). They
+     shrink-to-fit (min-width:0) so 4-5 tiles still sit on one line. Below
+     760px they wrap to 2-per-row so values stay legible on tablet/mobile. */
+  .kpis { display: flex; flex-wrap: nowrap; gap: 14px; }
   .kpi {
+    flex: 1 1 0; min-width: 0;
     background: var(--card); border: 1px solid var(--border); border-radius: 12px;
     padding: 16px 18px;
+  }
+  @media (max-width: 760px) {
+    .kpis { flex-wrap: wrap; }
+    .kpi { flex: 1 1 calc(50% - 7px); }
   }
   .kpi .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
   .kpi .value { font-size: 28px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
@@ -96,14 +103,43 @@
      their data. Industry-standard data-table convention. */
   th.right, td.right { text-align: right; }
   td .games-trigger {
-    color: var(--muted); cursor: pointer; font-size: 12px;
+    color: var(--muted); cursor: help; font-size: 12px;
     text-decoration: underline dotted; text-underline-offset: 3px;
   }
   td .games-trigger:hover { color: var(--accent); }
-  td .games-list { display: none; margin-top: 8px; font-size: 12px; color: var(--muted); }
-  tr.expanded td .games-list { display: block; }
   .badge-tobuy { color: var(--warn); font-weight: 700; }
+  .badge-future { color: var(--wish); font-weight: 700; }
   .badge-ok { color: var(--accent); }
+  /* "mai comprata" tag: shown on a size the user owns zero of in inventory. */
+  .size-tag {
+    display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+    background: rgba(255,255,255,0.06); color: var(--muted);
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; font-weight: 600;
+    vertical-align: middle;
+  }
+
+  /* Floating popup for "Per quali giochi" — appears on hover over the trigger.
+     Fixed-positioned via JS (getBoundingClientRect) because the table has
+     overflow:hidden which would clip an absolutely-positioned child. Bigger
+     and themed, not the tiny native title tooltip. */
+  .games-popup {
+    position: fixed; z-index: 60; display: none;
+    background: var(--card); border: 1px solid var(--accent);
+    border-radius: 10px; padding: 11px 13px; max-width: 340px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    font-size: 12.5px; color: var(--fg);
+  }
+  .games-popup.show { display: block; }
+  .games-popup .gp-title {
+    font-size: 10.5px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.4px; margin-bottom: 7px;
+  }
+  .games-popup ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  .games-popup li { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .games-popup li.wish .gp-name { color: var(--wish); }
+  .games-popup .gp-wishtag { font-size: 10px; color: var(--wish); margin-left: 6px; white-space: nowrap; }
+  .games-popup .gp-count { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .games-popup .gp-count b { color: var(--fg); }
 
   /* Inventory inline editor */
   .inv-row .qty-controls {
@@ -292,23 +328,6 @@
     border-radius: 8px; color: var(--warn); font-size: 13px;
   }
 
-  /* Wishlist preview table — same shape as Da comprare but visually distinct.
-     Subtle purple tint on the section + the "needed" cell so the user knows
-     at a glance these are HYPOTHETICAL needs (you don't own the game yet),
-     not actionable to_buy. Lower visual weight than the main to_buy table. */
-  .wish-section table { border: 1px solid var(--wish-dim); }
-  .wish-section .wish-badge {
-    color: var(--wish); font-weight: 700;
-  }
-  .wish-section .new-size {
-    display: inline-block; margin-left: 6px;
-    padding: 1px 6px; border-radius: 4px;
-    background: rgba(167,139,250,0.15); color: var(--wish);
-    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px;
-    font-weight: 600;
-  }
-  .wish-section .games-trigger { color: var(--wish); }
-  .wish-section .games-trigger:hover { color: var(--fg); }
 
   .empty { color: var(--muted); font-style: italic; padding: 16px; text-align: center; }
   .toast {
@@ -393,12 +412,6 @@
     <div id="tobuy-wrap"></div>
   </section>
 
-  <!-- Buste per giochi in wishlist (preview, non incluse nel "Da comprare") -->
-  <section class="wish-section" id="wish-section" style="display:none">
-    <h2>🎁 Buste future <span class="muted-suffix" id="wish-meta"></span></h2>
-    <div id="wish-wrap"></div>
-  </section>
-
   <!-- Inventario -->
   <section>
     <h2>📦 Inventario <span class="muted-suffix" id="inv-meta"></span></h2>
@@ -428,6 +441,7 @@
 </main>
 
 <div class="toast" id="toast"></div>
+<div class="games-popup" id="games-popup"></div>
 
 <script>
 const STATE = { data: null, dirtyRows: new Set() };
@@ -452,7 +466,6 @@ async function load() {
   renderKpis();
   renderReady();
   renderToBuy();
-  renderWishPreview();
   renderInventory();
 }
 
@@ -488,7 +501,11 @@ function renderKpis() {
 }
 
 function renderToBuy() {
-  const rows = STATE.data.to_buy;
+  // Unified table: real shortfalls (to_buy>0) + future demand from wishlist
+  // games (folded in from the old "Buste future" section as the "Giochi
+  // futuri" column). The popup on "Per quali giochi" shows per-game card
+  // counts and marks wishlist games as not-owned.
+  const rows = STATE.data.to_buy || [];
   const meta = document.getElementById("tobuy-meta");
   const wrap = document.getElementById("tobuy-wrap");
   if (!rows.length) {
@@ -496,7 +513,11 @@ function renderToBuy() {
     wrap.innerHTML = `<div class="empty">Niente da comprare 🎉 — tutte le misure richieste sono coperte.</div>`;
     return;
   }
-  meta.textContent = `${rows.length} ${rows.length === 1 ? "misura" : "misure"} da acquistare`;
+  const buyCount = rows.filter(r => r.to_buy > 0).length;
+  const futureOnly = rows.filter(r => r.to_buy === 0 && r.future_count > 0).length;
+  const parts = [`${buyCount} ${buyCount === 1 ? "misura" : "misure"} da acquistare`];
+  if (futureOnly > 0) parts.push(`${futureOnly} solo per la wishlist`);
+  meta.textContent = parts.join(" · ");
   wrap.innerHTML = `
     <table>
       <thead><tr>
@@ -504,26 +525,62 @@ function renderToBuy() {
         <th class="right">Necessarie</th>
         <th class="right">Possedute</th>
         <th class="right">Da comprare</th>
+        <th class="right" title="Giochi nella wishlist che userebbero questa misura">Giochi futuri</th>
         <th>Per quali giochi</th>
       </tr></thead>
       <tbody>
         ${rows.map((r, i) => `
           <tr data-i="${i}">
-            <td><strong>${r.size}</strong> mm</td>
-            <td class="num right">${fmt(r.needed)}</td>
-            <td class="num right">${fmt(r.owned)}</td>
-            <td class="num right badge-tobuy">⚠️ ${fmt(r.to_buy)}</td>
             <td>
-              <span class="games-trigger" onclick="this.parentElement.parentElement.classList.toggle('expanded')">
-                ${(r.games || "").split(", ").length} giochi
+              <strong>${r.size}</strong> mm
+              ${r.owned === 0 ? `<span class="size-tag" title="Non hai ancora nessuna busta di questa misura in inventario">mai comprata</span>` : ""}
+            </td>
+            <td class="num right">${r.needed ? fmt(r.needed) : "—"}</td>
+            <td class="num right">${fmt(r.owned)}</td>
+            <td class="num right ${r.to_buy > 0 ? "badge-tobuy" : ""}">${r.to_buy > 0 ? "⚠️ " + fmt(r.to_buy) : "—"}</td>
+            <td class="num right ${r.future_count > 0 ? "badge-future" : ""}">${r.future_count > 0 ? "🎁 " + fmt(r.future_count) : "—"}</td>
+            <td>
+              <span class="games-trigger" tabindex="0"
+                    onmouseenter="showGamesPopup(this, ${i})" onmouseleave="hideGamesPopup()"
+                    onfocus="showGamesPopup(this, ${i})" onblur="hideGamesPopup()">
+                ${(r.games_detail || []).length} giochi
               </span>
-              <div class="games-list">${escapeHtml(r.games || "")}</div>
             </td>
           </tr>
         `).join("")}
       </tbody>
     </table>
   `;
+}
+
+// Floating hover popup: per-game card counts for a size, owned + wishlist
+// (wishlist clearly marked "non posseduto"). Positioned via getBoundingClientRect
+// because the table's overflow:hidden clips absolutely-positioned children.
+function showGamesPopup(triggerEl, idx) {
+  const row = (STATE.data.to_buy || [])[idx];
+  if (!row) return;
+  const detail = row.games_detail || [];
+  const pop = document.getElementById("games-popup");
+  const items = detail.map(g => `
+    <li class="${g.owned ? "" : "wish"}">
+      <span class="gp-name">${escapeHtml(g.name)}${g.owned ? "" : `<span class="gp-wishtag">🎁 wishlist · non posseduto</span>`}</span>
+      <span class="gp-count"><b>${fmt(g.count)}</b> carte</span>
+    </li>
+  `).join("");
+  pop.innerHTML = `<div class="gp-title">Buste ${escapeHtml(row.size)} mm · carte per gioco</div><ul>${items}</ul>`;
+  pop.classList.add("show");
+  const r = triggerEl.getBoundingClientRect();
+  const pw = pop.offsetWidth, ph = pop.offsetHeight;
+  let left = r.left;
+  let top = r.bottom + 8;
+  if (left + pw > window.innerWidth - 12) left = window.innerWidth - pw - 12;
+  if (left < 12) left = 12;
+  if (top + ph > window.innerHeight - 12) top = r.top - ph - 8; // flip above
+  pop.style.left = left + "px";
+  pop.style.top = Math.max(12, top) + "px";
+}
+function hideGamesPopup() {
+  document.getElementById("games-popup").classList.remove("show");
 }
 
 function readyThumbCell(g) {
@@ -575,55 +632,6 @@ function renderReady() {
   `).join("");
 
   document.getElementById("ready-wrap").innerHTML = banner + `<div class="ready-grid">${cards}</div>`;
-}
-
-function renderWishPreview() {
-  // Wishlist sleeve demand: per-size totals from games with status='wishlist'.
-  // Rendered as a sister table to "Da comprare" but visually distinct so the
-  // user doesn't mistake hypothetical demand for actionable to_buy.
-  // Each row's "size" cell gets a "NUOVA MISURA" tag if the user has zero
-  // inventory for that size (already_covered=false) — easy way to spot
-  // "things I need to start stocking even before buying the game".
-  const rows = STATE.data.wishlist_preview || [];
-  const section = document.getElementById("wish-section");
-  if (!rows.length) {
-    section.style.display = "none";
-    return;
-  }
-  section.style.display = "";
-  const total = rows.reduce((s, r) => s + (r.needed || 0), 0);
-  const newSizes = rows.filter(r => !r.already_covered).length;
-  const metaParts = [`${rows.length} ${rows.length === 1 ? "misura" : "misure"}`, `${fmt(total)} buste`];
-  if (newSizes > 0) metaParts.push(`${newSizes} misura/e nuove`);
-  document.getElementById("wish-meta").textContent =
-    "(non incluse nel \"Da comprare\") · " + metaParts.join(" · ");
-
-  document.getElementById("wish-wrap").innerHTML = `
-    <table>
-      <thead><tr>
-        <th>Misura</th>
-        <th class="right">Servirebbero</th>
-        <th>Per quali giochi (wishlist)</th>
-      </tr></thead>
-      <tbody>
-        ${rows.map((r, i) => `
-          <tr data-i="${i}">
-            <td>
-              <strong>${r.size}</strong> mm
-              ${r.already_covered ? "" : `<span class="new-size" title="Non hai ancora questa misura in inventario">nuova misura</span>`}
-            </td>
-            <td class="num right wish-badge">🎁 ${fmt(r.needed)}</td>
-            <td>
-              <span class="games-trigger" onclick="this.parentElement.parentElement.classList.toggle('expanded')">
-                ${(r.games || "").split(", ").length} giochi
-              </span>
-              <div class="games-list">${escapeHtml(r.games || "")}</div>
-            </td>
-          </tr>
-        `).join("")}
-      </tbody>
-    </table>
-  `;
 }
 
 function renderInventory() {
