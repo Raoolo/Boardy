@@ -327,6 +327,55 @@
   .modal .btn-danger:hover { background: #d05656; }
   .modal .progress { font-size: 13px; color: var(--muted); }
   .modal .text { font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+
+  /* Backdrop behind the mobile slide-over sidebar. Inert on desktop. */
+  .sidebar-backdrop { display: none; }
+
+  /* ─── Mobile (≤640px): sidebar becomes a slide-over overlay ──────────
+     On phones the fixed 260px sidebar ate most of the screen. Here it
+     floats ABOVE the chat (position:absolute) with a dimmed, tap-to-close
+     backdrop instead of squeezing the conversation; collapsed = slid
+     off-screen so the chat pane always gets the full width. We also widen
+     the bubbles, trim padding, shrink the header, and bump the composer
+     input to 16px so iOS Safari doesn't auto-zoom on focus. */
+  @media (max-width: 640px) {
+    header { padding: 10px 14px; gap: 10px; }
+    h1 { font-size: 17px; }
+    nav { gap: 6px; }
+    nav a { font-size: 12px; padding: 5px 9px; }
+
+    .layout { position: relative; }
+    .sidebar {
+      position: absolute; top: 0; left: 0; bottom: 0; z-index: 50;
+      width: 80%; max-width: 300px; min-width: 0;
+      border-right: 1px solid var(--border);
+      box-shadow: 4px 0 20px rgba(0, 0, 0, 0.45);
+      transform: translateX(0);
+      transition: transform 220ms ease;
+    }
+    /* Collapsed on mobile = slide off-screen (not width:0). */
+    .layout.sidebar-collapsed .sidebar {
+      width: 80%; max-width: 300px; min-width: 0; border-right-width: 1px;
+      transform: translateX(-105%);
+    }
+    .sidebar-backdrop {
+      display: block; position: absolute; inset: 0; z-index: 40;
+      background: rgba(0, 0, 0, 0.5);
+      opacity: 0; pointer-events: none;
+      transition: opacity 220ms ease;
+    }
+    .layout:not(.sidebar-collapsed) .sidebar-backdrop {
+      opacity: 1; pointer-events: auto;
+    }
+    body.guest-mode .sidebar-backdrop { display: none; }
+
+    #chat { padding: 16px 12px; }
+    .composer-wrap { padding: 10px 12px 14px; }
+    .msg { max-width: 92%; }
+    input[type=text] { font-size: 16px; }
+    .splash { padding: 24px 12px; }
+    .splash h2 { font-size: 19px; }
+  }
 </style>
 </head>
 <body>
@@ -384,6 +433,8 @@
     </div>
     <ul class="conv-list" id="convList"></ul>
   </aside>
+  <!-- Dimmed backdrop for the mobile slide-over sidebar; tap to close. -->
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
 
   <section class="chat-pane">
     <div id="chat"></div>
@@ -406,18 +457,27 @@
   const newBtn = document.getElementById('newBtn');
   const layout = document.getElementById('layout');
   const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebarBackdrop = document.getElementById('sidebarBackdrop');
 
-  // Sidebar collapse state persists across reloads. Default = visible.
-  // Toggle via the ☰ button in the topbar or Ctrl+B (like VS Code).
+  // On phones the sidebar is a slide-over overlay (see the ≤640px media
+  // query): hidden by default, opened over the chat, closed by tapping the
+  // backdrop or picking a conversation.
+  const isMobile = () => window.matchMedia('(max-width: 640px)').matches;
+
+  // Sidebar collapse state. On desktop it persists across reloads (default
+  // visible). On mobile we always start collapsed regardless of the desktop
+  // preference — otherwise the overlay would cover the chat on every load.
   function applySidebarState(collapsed) {
     layout.classList.toggle('sidebar-collapsed', collapsed);
     sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
   }
-  applySidebarState(localStorage.getItem('boardy_sidebar_collapsed') === '1');
+  applySidebarState(isMobile() ? true
+                              : localStorage.getItem('boardy_sidebar_collapsed') === '1');
   sidebarToggle.addEventListener('click', () => {
     const collapsed = !layout.classList.contains('sidebar-collapsed');
     applySidebarState(collapsed);
-    localStorage.setItem('boardy_sidebar_collapsed', collapsed ? '1' : '0');
+    // Don't let a transient mobile toggle overwrite the desktop preference.
+    if (!isMobile()) localStorage.setItem('boardy_sidebar_collapsed', collapsed ? '1' : '0');
   });
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
@@ -425,6 +485,20 @@
       sidebarToggle.click();
     }
   });
+
+  // Close the mobile overlay after tapping the backdrop, picking a chat, or
+  // starting a new one — so the conversation is immediately visible.
+  function closeSidebarOnMobile() {
+    if (isMobile() && !layout.classList.contains('sidebar-collapsed')) {
+      applySidebarState(true);
+    }
+  }
+  sidebarBackdrop.addEventListener('click', closeSidebarOnMobile);
+  convList.addEventListener('click', (e) => {
+    if (e.target.closest('.conv-del')) return;   // deleting: keep it open
+    if (e.target.closest('.conv-item')) closeSidebarOnMobile();
+  });
+  newBtn.addEventListener('click', closeSidebarOnMobile);
 
   // Auth gate: settato dopo /auth/me. Guest = chat ephemera in sessionStorage,
   // niente sidebar, niente /conversations. Owner = comportamento legacy.
