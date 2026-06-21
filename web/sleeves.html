@@ -185,11 +185,15 @@
     gap: 10px; background: var(--card); border: 1px solid var(--border);
     border-radius: 10px; padding: 14px 16px;
   }
-  .add-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  /* min-width:0 sui campi-griglia: senza, gli input non scendono sotto la loro
+     larghezza intrinseca e la form sfora la card (il brand finiva "fuori dalla
+     nuvola" su mobile). width:100% li fa riempire la colonna. */
+  .add-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
   .add-form input {
     background: var(--field); color: var(--fg);
     border: 1px solid var(--field-edge); border-radius: 6px;
     padding: 7px 10px; font-size: 13px; font-family: inherit;
+    width: 100%; min-width: 0;
   }
   .add-form input:focus { outline: none; border-color: var(--accent); }
   .add-form input[type=number]::-webkit-outer-spin-button,
@@ -364,6 +368,10 @@
     .kpi { padding: 12px 14px; }
     .kpi .value { font-size: 22px; }
     th, td { padding: 8px 10px; }
+    /* "Aggiungi misura": 4+1 colonne non ci stanno in 390px → 2 colonne, con
+       il bottone Aggiungi su una riga propria a tutta larghezza. */
+    .add-form { grid-template-columns: 1fr 1fr; }
+    .add-form button { grid-column: 1 / -1; }
   }
 </style>
 </head>
