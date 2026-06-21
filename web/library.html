@@ -389,7 +389,16 @@
     .filters > input[type=text] { min-width: 0; max-width: none; flex: 1 1 100%; }
     .filters > input[type=number] { min-width: 0; max-width: none; flex: 1 1 120px; }
     .wrap { padding: 12px 12px 32px; }
-    .wrap table { min-width: 640px; }
+    /* Con table-layout:fixed le colonne a larghezza fissa (anno/giocatori/
+       durata/complessità/voto/buste ≈ 687px) si mangiavano tutto lo spazio su
+       mobile, schiacciando a ~0 le colonne Nome (%) e Tag (auto) → il nome
+       andava a capo lettera per lettera e i Tag collassavano. Qui diamo a Nome
+       e Tag una larghezza fissa vera e una min-width tabella che le contiene
+       tutte: la tabella scorre in orizzontale ma nessuna colonna collassa.
+       (Su mobile la vista di default è comunque la griglia, senza scroll.) */
+    .wrap table { min-width: 1000px; }
+    col.c-name     { width: 180px; }
+    col.c-friendly { width: 150px; }
     .grid { gap: 12px; }
   }
 </style>

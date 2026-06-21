@@ -358,7 +358,12 @@
     .filters > input, .filters > select, .ms { min-width: 0; flex: 1 1 140px; }
     .filters > input[type=text] { min-width: 0; max-width: none; flex: 1 1 100%; }
     .wrap { padding: 12px 12px 32px; }
-    .wrap table { min-width: 640px; }
+    /* Come in /library: evita che le colonne fisse schiaccino a ~0 le colonne
+       Nome (%) e Note (auto) su mobile. Larghezze vere + min-width che le
+       contiene tutte. (Default mobile = griglia, senza scroll.) */
+    .wrap table { min-width: 1000px; }
+    col.c-name  { width: 180px; }
+    col.c-notes { width: 150px; }
     .grid { gap: 12px; }
   }
 </style>
