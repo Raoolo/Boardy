@@ -19,6 +19,7 @@ gracefully (fall back to web_search, then manual PDF URL / local file).
 from __future__ import annotations
 
 import html as _html
+import os
 import re
 import time
 import urllib.error
@@ -27,8 +28,11 @@ import urllib.request
 from pathlib import Path
 
 BASE_URL  = "https://en.1jour-1jeu.com"
-CACHE_DIR = Path(__file__).resolve().parent / ".onejour_cache"
-CACHE_DIR.mkdir(exist_ok=True)
+# Cache root overridable via BOARDY_CACHE_DIR (read-only code mount in Docker).
+_CACHE_ROOT = os.environ.get("BOARDY_CACHE_DIR")
+CACHE_DIR = (Path(_CACHE_ROOT) / "onejour" if _CACHE_ROOT
+             else Path(__file__).resolve().parent / ".onejour_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

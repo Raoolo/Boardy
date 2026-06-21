@@ -15,6 +15,7 @@ cache). Undocumented API → isolated here so a breakage is a one-file fix.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -22,8 +23,13 @@ import urllib.request
 from pathlib import Path
 
 API_URL   = "https://api.geekdo.com/api/files"
-CACHE_DIR = Path(__file__).resolve().parent / ".bgg_files_cache"
-CACHE_DIR.mkdir(exist_ok=True)
+# Cache root is overridable via BOARDY_CACHE_DIR so a read-only code mount
+# (Docker bind-mounts etl/ :ro) can still cache to a writable path. Default
+# keeps the original repo-local dir for plain `uv run` dev.
+_CACHE_ROOT = os.environ.get("BOARDY_CACHE_DIR")
+CACHE_DIR = (Path(_CACHE_ROOT) / "bgg_files" if _CACHE_ROOT
+             else Path(__file__).resolve().parent / ".bgg_files_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

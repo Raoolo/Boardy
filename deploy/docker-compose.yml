@@ -47,6 +47,11 @@ services:
     # falls back to ./data/boardy.db (local-dev path).
     environment:
       BOARDY_DB: /data/boardy.db
+      # Code (etl/) is bind-mounted read-only, but the etl/*_api modules cache
+      # API responses next to themselves by default → write fails on the ro
+      # mount. Redirect every cache to the writable /data mount so BGG / 1j1ju /
+      # sleeve lookups (and the rulebook auto-fetch) work in the container.
+      BOARDY_CACHE_DIR: /data/.cache
     volumes:
       # Code: bind-mount for hot-update via `git pull && restart boardy`.
       # Read-only so a container-side bug can't corrupt the host repo.

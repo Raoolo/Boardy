@@ -12,6 +12,24 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-06-21 — Buste: 2ª fonte BGG `cardsetsbygame` (sblocca i giochi nuovi tipo Intarsia)
+
+**Sintomo.** Aggiungendo **Intarsia** (bgg 422126) da chat, il bot diceva che "non ha carte". Falso: ha 81 carte 44×68 e l'info è su BGG (pagina `/boardgame/422126/intarsia/sleeves`). Causa doppia: (1) l'unica fonte buste automatica era **sleeveyourgames** (`etl/syg_api`), che NON ha i giochi troppo nuovi → `found:false`; (2) il modello interpretava `found:false` come "il gioco non ha carte" e lo riferiva all'utente.
+
+**Scoperta.** La pagina BGG `/sleeves` è cookie-walled (403 a curl), MA è alimentata da endpoint JSON **aperti** su `api.geekdo.com` (stesso host non-Cloudflare dei Files). Trovati intercettando il traffico del browser:
+- `GET /api/cardsetsbygame?objectid=<bggid>` → `{cardSets:[{addon, name, cardTypes:[{width,height,quantity,name}]}]}`. **Questo è quello che serve** (misure + quantità carte). `cardSets:[]` = gioco senza carte; `null` = id inesistente.
+- `GET /api/sleevesbycard?width=W&height=H` → buste consigliate per una misura (non ci serve: noi vogliamo le misure, non i prodotti).
+
+Verificato che `cardsetsbygame` risponde **200 a curl semplice** (no browser, no cookie, no auth) → il codice di produzione usa `urllib` come gli altri client. Il browser è servito SOLO per la scoperta.
+
+**Gotcha Playwright su questo server (Ubuntu 26.04).** Playwright (anche l'ultima) NON ha build browser per `ubuntu26.04-x64` (`playwright install chromium/firefox` fallisce). Workaround per la scoperta: `snap install chromium` + `chromium.launch(executable_path="/snap/bin/chromium", args=["--no-sandbox","--disable-dev-shm-usage"])`. **Ma in produzione non serve nessun browser** per le buste (è tutto urllib). Implicazione: il download regolamenti via `bgg_browser` resta KO su questo OS finché Playwright non supporta 26.04 o non si punta allo snap chromium.
+
+**Gotcha edizioni multiple.** Un gioco può avere più `cardSet` con `addon=false` (edizioni diverse, es. Wingspan 212 vs 222) — **non sommarle**. `parse_cardsets` prende il PRIMO base set (ordine BGG = più rilevante; combacia con sleeveyourgames). Aggrega i `cardTypes` per (width,height).
+
+**Fix.** Nuovo client `etl/bgg_cards_api.py` (urllib+cache, stile `bgg_files_api`/`syg_api`). `app/tools.sleeve_lookup` interroga **entrambe** le fonti (quando c'è `bgg_id`) e fa **cross-check** (helper `_compare_sleeve_reqs`): match per misura con tolleranza ±1mm, confronto dei count sulle misure comuni; misure presenti in una sola fonte → `only_*` (NON rompono l'accordo: es. la "Goal board" 150×120 di Wingspan che sleeveyourgames omette). Esiti: concordi → `source="sleeveyourgames+bgg (concordi)"`; divergono → `source="sleeveyourgames (⚠️ diverge da bgg)"` + `warning` + `cross_check.bgg_requirements` (il bot mostra entrambe e fa scegliere l'utente); una sola fonte → `source` la nomina; nessuna → `found:false` con hint che **NON significa "niente carte"**. Schema tool + descrizione `bgg_lookup` aggiornati (passare SEMPRE `bgg_id`). Verifica: Intarsia → `boardgamegeek.com` 81×(44×68); Wingspan → `sleeveyourgames+bgg (concordi)`, goal-board come `only_bgg`; count divergenti → `agree:false` con dettaglio; 63 vs 63.5 → tollerato; Azul → `found:false`.
+
+---
+
 ## 2026-06-09 (sera) — BGG Files download: `fileid` ≠ `filepageid` (il bug del 404)
 
 **Sintomo.** Batch di download BGG Files: 2 file su 9 funzionavano (Vampiri, Barrage), gli altri 7 fallivano *sempre* con `BGGBrowserError: could not download` — anche con retry+backoff. Non era rate-limiting (il pattern non era "i primi N falliscono"): erano sempre gli **stessi** fileid a fallire.

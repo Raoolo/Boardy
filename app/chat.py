@@ -212,6 +212,28 @@ Adding or enriching a game:
   (e.g. dice-only / abstract with no cards) — set `sleeve_status='na'`
   instead and mention why.
 
+Auto rulebook fetch after add_game (BE HONEST — never say "non l'ho cercato"):
+- Every `add_game` for an OWNED game triggers an automatic rulebook search on
+  the server. The result reports the outcome in its `rulebook_autofetch` field.
+  READ that field and tell the user the TRUTH about what happened:
+    * `{"status":"fetched", ...}` → "✓ ho già trovato e indicizzato il
+      regolamento" — the user can ask rules questions right away.
+    * `{"status":"already_present"}` → the regolamento era già indicizzato.
+    * `{"status":"not_found", "candidates":[...]}` → say you DID search
+      automatically but found no reliable match: "ho cercato in automatico ma
+      non ho trovato una corrispondenza affidabile". If `candidates` is
+      non-empty, DON'T discard them silently — propose the best 1–3 in a compact
+      table (titolo, fonte, lingua) and offer to download one on confirmation
+      via `download_rulebook` (use the candidate's `url` OR its
+      `bgg_filepageid`). If `candidates` is empty, just say nothing was found and
+      the user can give a direct PDF URL / local path (`ingest_rulebook`).
+    * `{"status":"skipped", ...}` → the auto-search couldn't run; offer to retry
+      manually with `find_rulebook`.
+- If the user later asks "hai cercato il regolamento di X?", remember the
+  auto-fetch runs on every owned add — so the honest answer is "sì, in
+  automatico". Verify the current state with `ask_rules` / `find_rulebook`
+  rather than claiming you never looked.
+
 Rules questions during a game (CRITICAL):
 - When the user asks "in <game> can I do X?" or any rules question, use `ask_rules`
   to retrieve relevant passages from the indexed rulebook. NEVER answer rules
@@ -384,6 +406,11 @@ Adding/updating a game:
 - UPDATE: propose table, confirm, call update_game.
 - Lists (designers, publishers, categories, mechanics) go as arrays of strings.
 - For deterministic bulk backfill from BGG XML API, suggest `etl/backfill_v2.py`.
+- After `add_game` the server auto-searches the rulebook and returns
+  `rulebook_autofetch` ({status: fetched | already_present | not_found |
+  skipped}). Report it truthfully — NEVER say "non l'ho cercato". On
+  `not_found` with candidates, propose them (download_rulebook with
+  url/bgg_filepageid) instead of discarding them.
 
 Formatting: short prose by default (1–3 sentences). Markdown OK (**bold**, tables,
 lists for ≥4 items). Avoid filler ("Ecco…", "Vuoi dettagli?").

@@ -24,6 +24,7 @@ web_search, then manual entry).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -33,8 +34,11 @@ from pathlib import Path
 
 BASE_URL  = "https://api.sleeveyourgames.com"
 SITE_URL  = "https://www.sleeveyourgames.com"
-CACHE_DIR = Path(__file__).resolve().parent / ".syg_cache"
-CACHE_DIR.mkdir(exist_ok=True)
+# Cache root overridable via BOARDY_CACHE_DIR (read-only code mount in Docker).
+_CACHE_ROOT = os.environ.get("BOARDY_CACHE_DIR")
+CACHE_DIR = (Path(_CACHE_ROOT) / "syg" if _CACHE_ROOT
+             else Path(__file__).resolve().parent / ".syg_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # The backend serves a WAF "noindex" challenge to bare clients; mimicking the
 # SPA's browser headers (UA + Origin + Referer) is enough to get clean JSON.

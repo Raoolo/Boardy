@@ -335,8 +335,11 @@ def add_game(
     _backfill_friendly_tags(gid)
     # Auto-fetch the rulebook IFF we find a confident exact-title match online;
     # ambiguous cases are left for the chat propose-and-confirm flow. Best-effort.
-    _backfill_rulebook(gid)
-    return {"ok": True, "id": gid, "name": name}
+    # Surface the outcome so the chat layer can be honest ("ho cercato, nessun
+    # match affidabile") and propose low-confidence candidates instead of lying
+    # ("non l'ho cercato") — see app/chat.py system prompt.
+    rb = _backfill_rulebook(gid)
+    return {"ok": True, "id": gid, "name": name, "rulebook_autofetch": rb}
 
 
 def update_game(
@@ -1010,16 +1013,26 @@ def _rulebook_core(title: str) -> str:
     return " ".join(toks)
 
 
-def _backfill_rulebook(game_id: int) -> bool:
+def _backfill_rulebook(game_id: int) -> dict:
     """Post-commit hook: auto-fetch a rulebook for a freshly added game IFF a
-    confident match exists; otherwise do nothing (the chat flow will propose).
+    confident match exists; otherwise REPORT what was searched so the chat flow
+    can be honest ("ho cercato in automatico, nessun match affidabile") and
+    surface the low-confidence candidates instead of discarding them in silence.
 
     Tries 1j1ju first (fast, no browser): a candidate whose title (minus
     rulebook-words) normalizes EXACTLY to the game name. If none, and the game
     has a bgg_id and the browser is enabled, tries BGG Files (headless browser)
     taking the top rulebook only when its score is high (EN/strong keyword).
+
+    Returns a dict describing the outcome (consumed by `add_game`, read by the
+    chat system prompt):
+      {"status": "already_present"}                 — game already had a rulebook
+      {"status": "fetched", "source": "<url>"}      — confident match, indexed
+      {"status": "not_found", "candidates": [...]}  — searched, no reliable match;
+                                                      candidates carry weak hits (may be [])
+      {"status": "skipped", "reason": "..."}        — could not search (error/no game)
     Best-effort: every failure is swallowed so it never blocks `add_game`.
-    Skips if the game already has a rulebook.
+    Skips (already_present) if the game already has a rulebook.
     """
     try:
         from . import rulebooks
@@ -1028,25 +1041,25 @@ def _backfill_rulebook(game_id: int) -> bool:
         with get_conn() as conn:
             row = conn.execute("SELECT name, bgg_id FROM games WHERE id=?", (game_id,)).fetchone()
             if not row:
-                return False
+                return {"status": "skipped", "reason": "game not found"}
             name, bgg_id = row["name"], row["bgg_id"]
             already = conn.execute(
                 "SELECT 1 FROM rulebooks WHERE game_id=? LIMIT 1", (game_id,)
             ).fetchone()
         if already:
-            return False
+            return {"status": "already_present"}
 
-        # 1) 1j1ju strong exact-title match
+        # 1) 1j1ju strong exact-title match → auto-ingest
         target = rulebooks._norm_name(name)
-        strong = [h for h in onejour_api.search_rulebooks(name, limit=8)
-                  if _rulebook_core(h["title"]) == target]
+        hits = onejour_api.search_rulebooks(name, limit=8)
+        strong = [h for h in hits if _rulebook_core(h["title"]) == target]
         if strong:
             strong.sort(key=lambda h: (h["lang"] != "EN", len(h["title"])))
             dl = _fetch_pdf_bytes(strong[0]["url"])
             if "error" not in dl:
                 res = rulebooks.ingest_bytes(name, dl["data"], source=strong[0]["url"])
                 if res.get("ok"):
-                    return True
+                    return {"status": "fetched", "source": strong[0]["url"]}
 
         # 2) BGG Files fallback (headless browser) — only a high-confidence top hit
         if bgg_id and os.environ.get("BGG_BROWSER_ENABLED", "1") != "0":
@@ -1058,10 +1071,22 @@ def _backfill_rulebook(game_id: int) -> bool:
                 if "data" in r:
                     res = rulebooks.ingest_bytes(
                         name, r["data"], source=f"bgg:filepage/{cands[0]['filepageid']}")
-                    return bool(res.get("ok"))
-        return False
-    except Exception:
-        return False
+                    if res.get("ok"):
+                        return {"status": "fetched",
+                                "source": f"bgg:filepage/{cands[0]['filepageid']}"}
+
+        # No confident match. Surface the weak hits (1j1ju titles that didn't
+        # normalize-match + BGG Files metadata, no browser) so the chat can
+        # propose-and-confirm instead of pretending nothing was searched.
+        candidates: list[dict] = [
+            {"title": h["title"], "url": h["url"], "source": "1j1ju.com", "lang": h["lang"]}
+            for h in hits
+        ]
+        if bgg_id:
+            candidates += _bgg_candidates(int(bgg_id))
+        return {"status": "not_found", "candidates": candidates[:8]}
+    except Exception as e:
+        return {"status": "skipped", "reason": f"{type(e).__name__}: {e}"}
 
 
 def web_search(query: str, include_domains: list[str] | None = None,
@@ -1223,52 +1248,151 @@ def bgg_lookup(bgg_id: int) -> dict:
     return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
+def _compare_sleeve_reqs(syg: list[dict], bgg: list[dict],
+                         tol_mm: float = 1.0) -> dict:
+    """Cross-check two base_requirements lists (card sizes + counts).
+
+    Match lines by card size with a ±tol_mm tolerance (handles 63 vs 63.5 etc.),
+    then compare counts on the sizes present in BOTH sources. Sizes that exist in
+    only one source (e.g. BGG also lists a 'Goal board' 150×120 that sleeveyourgames
+    omits) are reported as `only_*` but do NOT, by themselves, break agreement —
+    those are usually non-card components or promos, not a real conflict.
+
+    `agree` is True iff there's at least one common size AND no count mismatch on
+    any common size.
+    """
+    def norm(reqs):
+        return [(float(r["width_mm"]), float(r["height_mm"]), int(r.get("count") or 0))
+                for r in (reqs or [])]
+    A, B = norm(syg), norm(bgg)
+    matched_b: set[int] = set()
+    mismatches: list[dict] = []
+    only_syg: list[dict] = []
+    for (wa, ha, ca) in A:
+        hit = None
+        for i, (wb, hb, cb) in enumerate(B):
+            if i in matched_b:
+                continue
+            if abs(wa - wb) <= tol_mm and abs(ha - hb) <= tol_mm:
+                hit = (i, cb)
+                break
+        if hit is None:
+            only_syg.append({"count": ca, "width_mm": wa, "height_mm": ha})
+        else:
+            i, cb = hit
+            matched_b.add(i)
+            if ca != cb:
+                mismatches.append({"size": f"{wa:g}×{ha:g}",
+                                   "syg_count": ca, "bgg_count": cb})
+    only_bgg = [{"count": cb, "width_mm": wb, "height_mm": hb}
+                for i, (wb, hb, cb) in enumerate(B) if i not in matched_b]
+    agree = bool(matched_b) and not mismatches
+    return {"agree": agree, "count_mismatches": mismatches,
+            "only_sleeveyourgames": only_syg, "only_bgg": only_bgg}
+
+
 def sleeve_lookup(name: str, bgg_id: int | None = None) -> dict:
-    """Look up card-sleeve sizes + counts for a game from sleeveyourgames.com.
+    """Look up card-sleeve sizes + counts for a game (deterministic, no scraping).
 
-    DETERMINISTIC source for "Buste previste" — hits sleeveyourgames' JSON API
-    (name → id → card list), NOT web scraping. BGG's API does NOT expose card
-    sizes, so this is the structured source. Returns `requirements` already
-    shaped for `set_sleeve_requirements` ({count, width_mm, height_mm}), plus a
-    per-expansion breakdown.
+    TWO deterministic sources, cross-checked:
+      1. sleeveyourgames.com (name → id → card list) — sleeve-oriented, primary;
+      2. BGG `cardsetsbygame` (by `bgg_id`) — covers new games sleeveyourgames
+         lacks (e.g. Intarsia) AND is used to VERIFY source 1.
 
-    Pass `bgg_id` (from bgg_lookup) when you have it: used to pick the right
-    candidate if the name is ambiguous, and echoed back as `bgg_id_match` so you
-    can sanity-check the hit.
+    Behaviour by what's available (always pass `bgg_id`!):
+      • both sources hit → `requirements` = sleeveyourgames (primary); a
+        `cross_check` block compares them. If they AGREE, `source` =
+        "sleeveyourgames+bgg (concordi)". If they DISAGREE, `source` =
+        "sleeveyourgames (⚠️ diverge da bgg)", a `warning` is set, and
+        `cross_check.bgg_requirements` holds BGG's version — SHOW BOTH to the
+        user and ask which to use before saving.
+      • only one hits → that one's `requirements`, `source` names it.
+      • neither hits → `found:false`. A miss does NOT mean "no cards"; it means
+        sizes weren't found automatically — fall back to `web_search`
+        (include_domains=["sleeveyourgames.com"]), then ASK THE USER for mm sizes.
 
-    Returns `{"found": false, ...}` when the game isn't in sleeveyourgames' DB
-    (common for very new releases). On a miss, fall back to `web_search`
-    (include_domains=["sleeveyourgames.com"]); if that's also empty, tell the
-    user the sizes must be entered manually. Does NOT cover non-card games.
+    `requirements` is already shaped for `set_sleeve_requirements`
+    ({count, width_mm, height_mm}), plus a per-expansion breakdown.
 
     Args:
         name: game name (English works best — sleeveyourgames indexes English).
-        bgg_id: optional BGG id to disambiguate / verify the match.
+        bgg_id: BGG id — disambiguates sleeveyourgames, unlocks the BGG source,
+            and enables the cross-check. Strongly recommended.
     """
     from etl import syg_api
+    syg_parsed = None
+    syg_error = None
     try:
-        parsed = syg_api.lookup(name, bgg_id=bgg_id)
+        syg_parsed = syg_api.lookup(name, bgg_id=bgg_id)
     except syg_api.SYGError as e:
-        return {"found": False, "error": str(e),
-                "hint": "Fall back to web_search on sleeveyourgames.com, then manual entry."}
+        syg_error = str(e)
     except Exception as e:
-        return {"found": False, "error": f"{type(e).__name__}: {e}"}
+        syg_error = f"{type(e).__name__}: {e}"
 
-    if parsed is None:
-        return {"found": False, "name": name,
-                "hint": ("Not in sleeveyourgames' DB (often a very new game). "
-                         "Try web_search include_domains=['sleeveyourgames.com']; "
-                         "if empty, ask the user for the mm sizes.")}
+    bgg_parsed = None
+    if bgg_id is not None:
+        try:
+            from etl import bgg_cards_api
+            bgg_parsed = bgg_cards_api.lookup(bgg_id)
+        except Exception:
+            bgg_parsed = None
 
-    return {
-        "found": True,
-        "name": parsed["name"],
-        "year": parsed["year"],
-        "bgg_id_match": parsed["bgg_id"] == bgg_id if bgg_id is not None else None,
-        "requirements": parsed["base_requirements"],   # feed straight into set_sleeve_requirements
-        "expansions": parsed["expansions"],
-        "source": "sleeveyourgames.com",
-    }
+    # --- both sources answered → cross-check ---
+    if syg_parsed is not None and bgg_parsed is not None:
+        cmp = _compare_sleeve_reqs(syg_parsed["base_requirements"],
+                                   bgg_parsed["base_requirements"])
+        out = {
+            "found": True,
+            "name": syg_parsed["name"],
+            "year": syg_parsed["year"],
+            "bgg_id_match": syg_parsed["bgg_id"] == bgg_id if bgg_id is not None else None,
+            "requirements": syg_parsed["base_requirements"],   # primary
+            "expansions": syg_parsed["expansions"],
+            "cross_check": {**cmp, "bgg_requirements": bgg_parsed["base_requirements"]},
+        }
+        if cmp["agree"]:
+            out["source"] = "sleeveyourgames+bgg (concordi)"
+        else:
+            out["source"] = "sleeveyourgames (⚠️ diverge da bgg)"
+            out["warning"] = ("Le due fonti NON concordano sulle buste. Mostra "
+                              "all'utente ENTRAMBE le versioni (sleeveyourgames in "
+                              "`requirements`, BGG in `cross_check.bgg_requirements`) "
+                              "e chiedi quale usare PRIMA di salvare.")
+        return out
+
+    # --- only sleeveyourgames ---
+    if syg_parsed is not None:
+        return {
+            "found": True,
+            "name": syg_parsed["name"],
+            "year": syg_parsed["year"],
+            "bgg_id_match": syg_parsed["bgg_id"] == bgg_id if bgg_id is not None else None,
+            "requirements": syg_parsed["base_requirements"],
+            "expansions": syg_parsed["expansions"],
+            "source": "sleeveyourgames.com",
+        }
+
+    # --- only BGG ---
+    if bgg_parsed is not None:
+        return {
+            "found": True,
+            "name": name,
+            "year": None,
+            "bgg_id_match": True,   # looked up directly by bgg_id
+            "requirements": bgg_parsed["base_requirements"],
+            "expansions": bgg_parsed["expansions"],
+            "source": "boardgamegeek.com",
+        }
+
+    # --- neither ---
+    out = {"found": False, "name": name,
+           "hint": ("Sizes not found automatically (NOT the same as 'no cards'). "
+                    + ("Pass bgg_id to enable the BGG source. " if bgg_id is None else "")
+                    + "Try web_search include_domains=['sleeveyourgames.com']; "
+                    "if empty, ask the user for the mm sizes.")}
+    if syg_error:
+        out["error"] = syg_error
+    return out
 
 
 def search_games_semantic(
@@ -2066,8 +2190,8 @@ TOOLS = [
             "mechanics. Keys match add_game/add_to_wishlist kwargs, so feed them "
             "straight into the write tool after confirmation. Get the id from "
             "bgg_search or a BGG URL (.../boardgame/422126/... → 422126). NOTE: the "
-            "API does NOT return card/sleeve sizes — use web_search on "
-            "sleeveyourgames.com for 'Buste previste'."
+            "metadata API does NOT return card/sleeve sizes — use sleeve_lookup "
+            "(name + bgg_id) for 'Buste previste'."
         ),
         "input_schema": {
             "type": "object",
@@ -2078,20 +2202,25 @@ TOOLS = [
     {
         "name": "sleeve_lookup",
         "description": (
-            "Card-sleeve sizes + counts for a game, from sleeveyourgames.com's "
-            "JSON API (deterministic). USE THIS for 'Buste previste' instead of "
-            "web_search — BGG's API does NOT expose card sizes. Returns "
-            "`requirements` already shaped for set_sleeve_requirements "
-            "({count, width_mm, height_mm}) plus per-expansion breakdown. Pass "
-            "`bgg_id` (from bgg_lookup) to disambiguate/verify. If `found:false` "
-            "(game not in their DB — common for brand-new games), fall back to "
-            "web_search on sleeveyourgames.com, then ask the user to enter sizes."
+            "Card-sleeve sizes + counts for a game (deterministic). USE THIS for "
+            "'Buste previste' instead of web_search. Cross-checks TWO sources: "
+            "sleeveyourgames.com (primary) AND BGG card sizes (cardsetsbygame) — so "
+            "ALWAYS pass `bgg_id` to enable BGG + the cross-check. Returns "
+            "`requirements` shaped for set_sleeve_requirements ({count, width_mm, "
+            "height_mm}) + per-expansion breakdown; `source` says what answered. "
+            "When both sources answer, a `cross_check` block compares them: if "
+            "`cross_check.agree` is FALSE (or a `warning` is present), the two "
+            "sources DISAGREE — show the user BOTH versions (`requirements` vs "
+            "`cross_check.bgg_requirements`) and ask which to use before saving. "
+            "If `found:false`, sizes weren't found automatically — this does NOT "
+            "mean the game has no cards; fall back to web_search on "
+            "sleeveyourgames.com, then ask the user for the mm sizes."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Game name (English works best)."},
-                "bgg_id": {"type": "integer", "description": "Optional BGG id to verify the match."},
+                "bgg_id": {"type": "integer", "description": "BGG id — disambiguates AND unlocks the BGG fallback. Strongly recommended."},
             },
             "required": ["name"],
         },

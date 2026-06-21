@@ -19,6 +19,11 @@ etl/.bgg_cache/
 etl/.syg_cache/
 etl/.onejour_cache/
 etl/.bgg_files_cache/
+etl/.bgg_cards_cache/
+# Docker runtime cache (BOARDY_CACHE_DIR points here in the container)
+data/.cache/
+# Stray runtime logs from manual `uvicorn` runs
+boardy_run.log
 
 # Python
 __pycache__/

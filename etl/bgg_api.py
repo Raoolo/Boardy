@@ -28,8 +28,11 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 BASE_URL  = "https://boardgamegeek.com/xmlapi2"
-CACHE_DIR = Path(__file__).resolve().parent / ".bgg_cache"
-CACHE_DIR.mkdir(exist_ok=True)
+# Cache root overridable via BOARDY_CACHE_DIR (read-only code mount in Docker).
+_CACHE_ROOT = os.environ.get("BOARDY_CACHE_DIR")
+CACHE_DIR = (Path(_CACHE_ROOT) / "bgg" if _CACHE_ROOT
+             else Path(__file__).resolve().parent / ".bgg_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # BGG asks for ≤ ~2 req/s. We use 0.6s between calls to be polite.
 RATE_DELAY_S = 0.6
