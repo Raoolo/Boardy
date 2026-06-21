@@ -319,6 +319,26 @@
   }
   .toast.error { border-color: var(--danger); color: var(--danger); }
   .toast.show { opacity: 1; }
+
+  /* ─── Mobile (≤640px): header su due righe + leggibilità ──────────────
+     Logo + badge auth sulla prima riga, nav sezioni su riga propria a tutta
+     larghezza. KPI 2 per riga, padding ridotti, input a 16px (no auto-zoom). */
+  @media (max-width: 640px) {
+    header { padding: 10px 14px; gap: 8px 12px; }
+    h1 { font-size: 17px; }
+    nav { order: 10; flex-basis: 100%; gap: 6px; }
+    nav a, header a { font-size: 12px; padding: 5px 9px; }
+    header .spacer { order: 5; }
+    .auth-badge { order: 6; }
+
+    input, textarea, select { font-size: 16px; }
+    main { padding: 16px 12px 60px; }
+    section { margin-bottom: 26px; }
+    .kpis { grid-template-columns: 1fr 1fr; gap: 10px; }
+    .kpi { padding: 12px 14px; }
+    .kpi .value { font-size: 22px; }
+    th, td { padding: 8px 10px; }
+  }
 </style>
 </head>
 <body>

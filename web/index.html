@@ -339,10 +339,15 @@
      the bubbles, trim padding, shrink the header, and bump the composer
      input to 16px so iOS Safari doesn't auto-zoom on focus. */
   @media (max-width: 640px) {
-    header { padding: 10px 14px; gap: 10px; }
+    /* Header on two rows: logo + auth badge up top, the section nav on its
+       own full-width line below (via flex order) — no more cramming the
+       brand and all four section pills onto a single line. */
+    header { padding: 10px 14px; gap: 8px 12px; }
     h1 { font-size: 17px; }
-    nav { gap: 6px; }
+    nav { order: 10; flex-basis: 100%; gap: 6px; }
     nav a { font-size: 12px; padding: 5px 9px; }
+    header .spacer { order: 5; }
+    .auth-badge { order: 6; }
 
     .layout { position: relative; }
     .sidebar {

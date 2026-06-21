@@ -334,6 +334,29 @@
   footer.bgg-attr a { display: inline-flex; opacity: 0.55; transition: opacity 150ms ease; }
   footer.bgg-attr a:hover { opacity: 1; }
   footer.bgg-attr img { height: 16px; width: auto; display: block; }
+
+  /* ─── Mobile (≤640px): header su due righe + leggibilità ──────────────
+     Logo + badge auth sulla prima riga, nav sezioni su riga propria a tutta
+     larghezza. Filtri impilati, tabella scrollabile, dock chat compatto,
+     input a 16px (no auto-zoom iOS). */
+  @media (max-width: 640px) {
+    header { padding: 10px 14px; gap: 8px 12px; }
+    h1 { font-size: 17px; }
+    nav { order: 10; flex-basis: 100%; gap: 6px; }
+    nav a, header a { font-size: 12px; padding: 5px 9px; }
+    header .spacer { order: 5; }
+    .auth-badge { order: 6; }
+
+    input, textarea, select { font-size: 16px; }
+    .kpis { padding: 14px 12px 0; }
+    .chat-dock { margin: 14px 12px 0; padding: 12px; }
+    .filters { padding: 10px 12px; gap: 8px; }
+    .filters > input, .filters > select, .ms { min-width: 0; flex: 1 1 140px; }
+    .filters > input[type=text] { min-width: 0; max-width: none; flex: 1 1 100%; }
+    .wrap { padding: 12px 12px 32px; }
+    .wrap table { min-width: 640px; }
+    .grid { gap: 12px; }
+  }
 </style>
 </head>
 <body>
