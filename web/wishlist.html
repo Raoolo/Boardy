@@ -485,7 +485,10 @@ const PRIO_LABEL = { high: "🔴 Alta", medium: "🟡 Media", low: "🟢 Bassa" 
 const state = {
   items: [],
   filtered: [],
-  view: localStorage.getItem("wishlist.view") || "table",
+  // Vista condivisa con /library (chiave `boardy.view`): le due pagine restano
+  // coerenti. Default: griglia su mobile (≤640px), tabella su desktop.
+  view: localStorage.getItem("boardy.view")
+    || (window.matchMedia("(max-width: 640px)").matches ? "grid" : "table"),
   sortKey: "priority",
   sortDir: 1,
 };
@@ -530,12 +533,18 @@ function prioEditor(g) {
   return `<select class="prio-edit" data-name="${escapeHtml(g.name)}">${opts}</select>`;
 }
 
+// Vista tabella: solo il nome (l'anno ha la sua colonna "Anno" dedicata).
 function nameCell(g) {
-  const year = g.year_published ? `<span class="year">(${g.year_published})</span>` : "";
   if (g.bgg_id) {
-    return `<a href="https://boardgamegeek.com/boardgame/${g.bgg_id}" target="_blank" rel="noopener">${escapeHtml(g.name)}</a> ${year}`;
+    return `<a href="https://boardgamegeek.com/boardgame/${g.bgg_id}" target="_blank" rel="noopener">${escapeHtml(g.name)}</a>`;
   }
-  return `${escapeHtml(g.name)} ${year}`;
+  return escapeHtml(g.name);
+}
+
+// Vista griglia: nome + anno inline (la card non ha una colonna Anno separata).
+function cardTitle(g) {
+  const year = g.year_published ? ` <span class="year">(${g.year_published})</span>` : "";
+  return nameCell(g) + year;
 }
 
 function actionButtons(g) {
@@ -628,7 +637,7 @@ function renderGrid() {
       ${cardThumb(g)}
       <div class="prio-badge">${prioBadge(g)}</div>
       <div class="body">
-        <div class="title">${nameCell(g)}</div>
+        <div class="title">${cardTitle(g)}</div>
         <div class="meta">
           ${fmtPlayers(g) !== "—" ? `<span>👥 ${fmtPlayers(g)}</span>` : ""}
           ${fmtDuration(g) !== "—" ? `<span>⏱ ${fmtDuration(g)}</span>` : ""}
@@ -880,7 +889,7 @@ document.querySelectorAll("th[data-sort]").forEach(th => {
 document.querySelectorAll("#viewToggle button").forEach(btn => {
   btn.addEventListener("click", () => {
     state.view = btn.dataset.view;
-    localStorage.setItem("wishlist.view", state.view);
+    localStorage.setItem("boardy.view", state.view);
     render();
   });
 });

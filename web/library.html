@@ -511,7 +511,11 @@ const state = {
   filtered: [],
   sortKey: "name",
   sortDir: 1, // 1 asc, -1 desc
-  view: localStorage.getItem("library.view") || "table", // "table" | "grid"
+  // Vista condivisa con /wishlist (chiave `boardy.view`) così le due pagine
+  // restano coerenti. Default: griglia su mobile (≤640px, le card si leggono
+  // meglio del tabellone stretto), tabella su desktop. Il toggle la persiste.
+  view: localStorage.getItem("boardy.view")
+    || (window.matchMedia("(max-width: 640px)").matches ? "grid" : "table"), // "table" | "grid"
   // Multi-select: arrays of selected option strings. Empty = no filter.
   selected: { friendly: [] },
   // Smart filter: when set, only games whose id is in this Set survive
@@ -609,12 +613,14 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
+// Vista tabella: solo il nome. L'anno ha già la sua colonna "Anno" dedicata,
+// stamparlo anche qui inline lo faceva "addossare" alla colonna accanto su
+// mobile. (In griglia invece l'anno sta inline nel titolo — vedi cardTitle.)
 function nameCell(g) {
-  const year = g.year_published ? `<span class="year">(${g.year_published})</span>` : "";
   if (g.bgg_id) {
-    return `<a href="https://boardgamegeek.com/boardgame/${g.bgg_id}" target="_blank" rel="noopener">${escapeHtml(g.name)}</a> ${year}`;
+    return `<a href="https://boardgamegeek.com/boardgame/${g.bgg_id}" target="_blank" rel="noopener">${escapeHtml(g.name)}</a>`;
   }
-  return `${escapeHtml(g.name)} ${year}`;
+  return escapeHtml(g.name);
 }
 
 function sortKeyValue(g, key) {
@@ -1103,7 +1109,7 @@ document.addEventListener("click", (e) => {
 document.querySelectorAll("#viewToggle button").forEach(btn => {
   btn.addEventListener("click", () => {
     state.view = btn.dataset.view;
-    localStorage.setItem("library.view", state.view);
+    localStorage.setItem("boardy.view", state.view);
     render();
   });
 });
