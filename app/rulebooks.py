@@ -12,6 +12,7 @@ cosine similarity at query time — at our scale (≲ 10k chunks total) this is 
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Iterable
@@ -25,6 +26,41 @@ from .db import get_conn
 EMBED_MODEL_NAME = "intfloat/multilingual-e5-base"
 CHUNK_TARGET_TOKENS = 350           # ~ approx; 1 token ≈ 0.75 words for e5
 CHUNK_OVERLAP_TOKENS = 60
+
+
+# --- rulebook language gating -------------------------------------------------
+# We only index rulebooks in languages DeepSeek (chat/Q&A) + e5 (embeddings)
+# handle well: Latin-script Western-European. The filename suffix on 1j1ju is
+# NOT a reliable language signal (it's a French site — a `-rules.pdf` can be
+# French text), so we sniff the ACTUAL extracted text instead. Default set
+# overridable via BOARDY_RULEBOOK_LANGS="EN,IT,ES,DE,FR,PT".
+_DEFAULT_ALLOWED_LANGS = {"EN", "IT", "ES", "DE", "FR", "PT"}
+
+
+def allowed_rulebook_langs() -> set[str]:
+    raw = os.environ.get("BOARDY_RULEBOOK_LANGS")
+    if not raw:
+        return set(_DEFAULT_ALLOWED_LANGS)
+    langs = {tok.strip().upper() for tok in raw.split(",") if tok.strip()}
+    return langs or set(_DEFAULT_ALLOWED_LANGS)
+
+
+def detect_language(text: str) -> str:
+    """Best-effort language tag of `text` as an uppercase ISO-639-1 code
+    ('EN','IT','DE','RU','ZH', …), or '?' when there's too little text to judge.
+
+    Backed by py3langid (a deterministic, offline port of langid.py covering 97
+    languages) — far more robust than hand-rolled stopwords, and the project
+    already carries much heavier deps. We classify over ALL languages (not a
+    forced subset) and let the caller check membership in `allowed_rulebook_langs`,
+    so a Czech/Swedish/Japanese manual is correctly identified and rejected.
+    """
+    sample = (text or "").strip()
+    if len(sample) < 40:        # a cover page or near-empty extraction — don't guess
+        return "?"
+    import py3langid
+    lang, _score = py3langid.classify(sample[:10000])
+    return (lang or "?").upper()
 
 _model: SentenceTransformer | None = None
 
@@ -153,6 +189,46 @@ def _embed_query(text: str) -> np.ndarray:
 
 # --- public API ---------------------------------------------------------------
 
+def _store_rulebook(
+    conn,
+    *,
+    game_id: int,
+    source: str,
+    pages: list[tuple[int, str]],
+    pdf_blob: bytes,
+    ocr_report: str | None = None,
+) -> tuple[int, int]:
+    """Chunk → embed → store a rulebook + its chunks. Returns (rulebook_id, n_chunks).
+
+    Shared core for both PDF ingestion (`ingest_bytes`) and photo/OCR ingestion
+    (`ingest_pages`): the only difference upstream is HOW `pages` were produced
+    (pypdf text extraction vs. vision transcription). Re-ingesting the same
+    `source` replaces the prior row via the DELETE below (UNIQUE(game_id, source_path)).
+    Raises ValueError("no-chunks") if the pages produce 0 chunks.
+    """
+    chunks = _chunk_pages(pages)
+    if not chunks:
+        raise ValueError("no-chunks")
+
+    embeddings = _embed_passages([c["text"] for c in chunks])
+
+    # Replace any prior rulebook for this game+source
+    conn.execute("DELETE FROM rulebooks WHERE game_id=? AND source_path=?", (game_id, source))
+    cur = conn.execute(
+        """INSERT INTO rulebooks(game_id, source_path, page_count, embedding_model, pdf_blob, ocr_report)
+           VALUES(?,?,?,?,?,?)""",
+        (game_id, source, len(pages), EMBED_MODEL_NAME, pdf_blob, ocr_report),
+    )
+    rb_id = cur.lastrowid
+    for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+        conn.execute(
+            """INSERT INTO rulebook_chunks(rulebook_id, chunk_index, page_start, page_end, text, embedding)
+               VALUES(?,?,?,?,?,?)""",
+            (rb_id, i, chunk["page_start"], chunk["page_end"], chunk["text"], emb.tobytes()),
+        )
+    return rb_id, len(chunks)
+
+
 def ingest_bytes(game_name: str, data: bytes, *, source: str) -> dict:
     """Index a rulebook from raw PDF bytes; stores the PDF itself in the DB.
 
@@ -176,36 +252,81 @@ def ingest_bytes(game_name: str, data: bytes, *, source: str) -> dict:
         pages = _pages_from_reader(reader)
         if not any(t for _, t in pages):
             return {"error": "no extractable text in PDF (might be a scanned image — "
-                             "OCR not yet supported)"}
+                             "carica delle foto del regolamento per l'OCR)"}
 
-        chunks = _chunk_pages(pages)
-        if not chunks:
-            return {"error": "PDF parsed but produced 0 chunks"}
+        # Language gate: reject manuals NOT in a well-supported language. The
+        # 1j1ju filename suffix lies (French site), so we sniff the real text.
+        allowed = allowed_rulebook_langs()
+        lang = detect_language("\n".join(t for _, t in pages))
+        if lang != "?" and lang not in allowed:
+            return {
+                "error": (f"regolamento in lingua non supportata ({lang}); "
+                          f"Boardy indicizza solo {', '.join(sorted(allowed))}. "
+                          "Cerca un'altra edizione (EN consigliata) o carica le foto "
+                          "del regolamento nella lingua giusta."),
+                "detected_lang": lang,
+                "allowed_langs": sorted(allowed),
+            }
 
-        embeddings = _embed_passages([c["text"] for c in chunks])
-
-        # Replace any prior rulebook for this game+source
-        conn.execute("DELETE FROM rulebooks WHERE game_id=? AND source_path=?", (game_id, source))
-        cur = conn.execute(
-            """INSERT INTO rulebooks(game_id, source_path, page_count, embedding_model, pdf_blob)
-               VALUES(?,?,?,?,?)""",
-            (game_id, source, len(pages), EMBED_MODEL_NAME, data),
-        )
-        rb_id = cur.lastrowid
-        for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-            conn.execute(
-                """INSERT INTO rulebook_chunks(rulebook_id, chunk_index, page_start, page_end, text, embedding)
-                   VALUES(?,?,?,?,?,?)""",
-                (rb_id, i, chunk["page_start"], chunk["page_end"], chunk["text"], emb.tobytes()),
+        try:
+            rb_id, n_chunks = _store_rulebook(
+                conn, game_id=game_id, source=source, pages=pages, pdf_blob=data,
             )
+        except ValueError:
+            return {"error": "PDF parsed but produced 0 chunks"}
         conn.commit()
     return {
         "ok": True,
         "game": canonical,
         "rulebook_id": rb_id,
         "pages": len(pages),
-        "chunks": len(chunks),
+        "chunks": n_chunks,
         "bytes": len(data),
+        "model": EMBED_MODEL_NAME,
+    }
+
+
+def ingest_pages(
+    game_name: str,
+    pages: list[tuple[int, str]],
+    *,
+    source: str,
+    pdf_blob: bytes,
+    ocr_report: str | None = None,
+) -> dict:
+    """Index a rulebook from already-transcribed pages (e.g. photo OCR).
+
+    Skips PDF text extraction: `pages` is a list of (page_number, text) already
+    produced upstream (see `app/ocr.py` + the photo orchestration in tools).
+    `pdf_blob` is a PDF assembled from the source photos so `get_pdf` keeps
+    returning a re-exportable artifact. `ocr_report` is the JSON quality report
+    persisted on the rulebook row. Same chunk/embed/store core as `ingest_bytes`.
+    """
+    pages = [(n, _clean(t)) for n, t in pages if t and t.strip()]
+    if not pages:
+        return {"error": "nessun testo leggibile estratto dalle foto"}
+
+    with get_conn() as conn:
+        game = _resolve_game(conn, game_name)
+        if not game:
+            return {"error": f"game {game_name!r} not found in DB"}
+        game_id, canonical = game["id"], game["name"]
+
+        try:
+            rb_id, n_chunks = _store_rulebook(
+                conn, game_id=game_id, source=source, pages=pages,
+                pdf_blob=pdf_blob, ocr_report=ocr_report,
+            )
+        except ValueError:
+            return {"error": "le foto sono state lette ma non hanno prodotto testo indicizzabile"}
+        conn.commit()
+    return {
+        "ok": True,
+        "game": canonical,
+        "rulebook_id": rb_id,
+        "pages": len(pages),
+        "chunks": n_chunks,
+        "bytes": len(pdf_blob),
         "model": EMBED_MODEL_NAME,
     }
 

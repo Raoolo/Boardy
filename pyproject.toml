@@ -32,6 +32,11 @@ dependencies = [
     # NB: dopo `uv sync` serve `uv run playwright install chromium` (scarica il
     # binario del browser, ~150MB, fuori dal pacchetto pip).
     "playwright>=1.45.0",
+    # OCR dei regolamenti da foto: visione via Google Gemini (DeepSeek non legge
+    # immagini — vedi app/ocr.py). Pillow assembla le foto in un PDF per pdf_blob.
+    "google-genai>=1.0.0",
+    "pillow>=11.0.0",
+    "py3langid>=0.3.0",
 ]
 
 [tool.uv]

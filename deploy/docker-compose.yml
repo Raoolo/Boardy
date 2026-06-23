@@ -111,6 +111,11 @@ services:
       - ../data:/data
     depends_on:
       - boardy
+    # The image-level healthcheck probes the web app on 127.0.0.1:8765.
+    # This service is a polling Telegram client and exposes no HTTP server,
+    # so inheriting that probe would mark a healthy bot as "unhealthy".
+    healthcheck:
+      disable: true
     networks:
       - boardy_net
     command: ["python", "-m", "bot.telegram_bot"]

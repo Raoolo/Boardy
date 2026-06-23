@@ -123,6 +123,26 @@
   }
   .new-chat-btn:hover { background: var(--accent); color: #0f1115; }
   .new-chat-btn .icon { font-size: 16px; line-height: 1; }
+  .conv-scope {
+    margin-top: 8px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  }
+  .conv-scope[hidden] { display: none; }
+  .conv-scope-btn {
+    border: 1px solid var(--field-edge);
+    background: var(--field);
+    color: var(--muted);
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .conv-scope-btn.active {
+    border-color: var(--accent);
+    color: var(--fg);
+    background: var(--accent-dim);
+  }
   .conv-list {
     flex: 1; overflow-y: auto;
     list-style: none; margin: 0; padding: 6px;
@@ -147,7 +167,15 @@
     border-left-color: var(--accent);
   }
   .conv-title {
-    flex: 1; font-size: 13px; color: var(--fg);
+    display: block; font-size: 13px; color: var(--fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .conv-main { flex: 1; min-width: 0; }
+  .conv-meta {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--muted);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .conv-item.active .conv-title { color: var(--fg); }
@@ -311,6 +339,14 @@
     cursor: pointer; font-family: inherit;
   }
   button.send:disabled { opacity: 0.5; cursor: progress; }
+  /* Tasto "allega foto del regolamento" accanto a Invia. Icona, stile defilato. */
+  button.attach {
+    flex: 0 0 auto; width: 44px; padding: 0; border-radius: 10px;
+    border: 1px solid var(--field-edge); background: var(--field); color: var(--fg);
+    cursor: pointer; font-size: 18px; line-height: 1;
+    transition: border-color 180ms ease, background 180ms ease;
+  }
+  button.attach:hover { border-color: var(--accent); }
 
   /* Drop zone overlay. */
   #dropOverlay {
@@ -435,7 +471,7 @@
 <!-- Banner guest e badge auth sono iniettati da web/static/auth.js. -->
 <script src="/static/auth.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<div id="dropOverlay"><div class="label">📕 Trascina qui il PDF del regolamento</div></div>
+<div id="dropOverlay"><div class="label">📕 Trascina qui il PDF o le foto del regolamento</div></div>
 <!-- Custom confirm dialog (replaces native confirm() for chat deletion).
      Generic enough to reuse for other destructive ops if needed — the JS
      `confirmDialog()` helper sets the title/message/button label per call. -->
@@ -458,6 +494,9 @@
       <input type="text" id="modalGame" list="gameNames" placeholder="Nome del gioco" autocomplete="off" />
       <datalist id="gameNames"></datalist>
     </div>
+    <div class="hint" style="font-size:12px;opacity:0.7;margin:6px 2px 0;">
+      PDF (con testo) oppure foto delle pagine — formati JPG, PNG, WebP. Il gioco deve già esistere in collezione.
+    </div>
     <div class="progress" id="modalProgress"></div>
     <div class="actions">
       <button class="btn-secondary" id="modalCancel">Annulla</button>
@@ -472,6 +511,10 @@
       <button class="new-chat-btn" id="newBtn" title="Nuova chat">
         <span class="icon">+</span><span class="label">Nuova chat</span>
       </button>
+      <div class="conv-scope" id="convScope" hidden>
+        <button class="conv-scope-btn active" id="scopeMine" type="button">Mie</button>
+        <button class="conv-scope-btn" id="scopeAudit" type="button">Audit</button>
+      </div>
     </div>
     <ul class="conv-list" id="convList"></ul>
   </aside>
@@ -482,6 +525,11 @@
     <div id="chat"></div>
     <div class="composer-wrap">
       <form id="f">
+        <!-- Allega foto del regolamento → OCR. Formati: JPG, PNG, WebP. -->
+        <input id="photoInput" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden />
+        <button class="attach" id="photoBtn" type="button"
+                title="Carica foto di un regolamento (JPG, PNG, WebP) e leggile via OCR"
+                aria-label="Carica foto del regolamento">📷</button>
         <input id="m" type="text" autocomplete="off"
                placeholder="Quante bustine 63,5×88 devo comprare?" autofocus />
         <button class="send" id="b" type="submit">Invia</button>
@@ -501,6 +549,9 @@
   const layout = document.getElementById('layout');
   const sidebarToggle = document.getElementById('sidebarToggle');
   const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+  const convScope = document.getElementById('convScope');
+  const scopeMine = document.getElementById('scopeMine');
+  const scopeAudit = document.getElementById('scopeAudit');
 
   // On phones the sidebar is a slide-over overlay (see the ≤640px media
   // query): hidden by default, opened over the chat, closed by tapping the
@@ -546,6 +597,8 @@
   // Auth gate: settato dopo /auth/me. Guest = chat ephemera in sessionStorage,
   // niente sidebar, niente /conversations. Owner = comportamento legacy.
   let isGuest = true;
+  let canAuditConversations = false;
+  let currentScope = localStorage.getItem('boardy_conv_scope') === 'audit' ? 'audit' : 'mine';
   let convId = parseInt(localStorage.getItem('boardy_conv_id') || '0') || null;
   let history = [];
   // Cache of the latest list so we can re-render the sidebar without
@@ -561,6 +614,27 @@
     if (id) localStorage.setItem('boardy_conv_id', String(id));
     else    localStorage.removeItem('boardy_conv_id');
     renderConvList();
+  }
+
+  function setScope(scope) {
+    currentScope = scope === 'audit' && canAuditConversations ? 'audit' : 'mine';
+    localStorage.setItem('boardy_conv_scope', currentScope);
+    scopeMine.classList.toggle('active', currentScope === 'mine');
+    scopeAudit.classList.toggle('active', currentScope === 'audit');
+    const auditMode = currentScope === 'audit';
+    input.disabled = auditMode;
+    btn.disabled = auditMode;
+    input.placeholder = auditMode
+      ? 'Vista audit: conversazioni in sola lettura'
+      : 'Quante bustine 63,5×88 devo comprare?';
+  }
+
+  function actorLabel(c) {
+    const origin = c.origin || 'web';
+    const name = c.actor_name || c.actor_id || 'sconosciuto';
+    const role = c.actor_role || 'owner';
+    if (origin === 'telegram') return `Telegram · ${role} · ${name}`;
+    return `${origin} · ${role} · ${name}`;
   }
 
   // Suggested prompts shown when the chat is empty. Picked to cover the
@@ -657,10 +731,22 @@
       li.className = 'conv-item' + (c.id === convId ? ' active' : '');
       li.dataset.id = String(c.id);
 
+      const main = document.createElement('span');
+      main.className = 'conv-main';
+
       const title = document.createElement('span');
       title.className = 'conv-title';
       title.textContent = c.title || `Chat #${c.id}`;
-      li.appendChild(title);
+      main.appendChild(title);
+
+      if (currentScope === 'audit') {
+        const meta = document.createElement('span');
+        meta.className = 'conv-meta';
+        meta.textContent = actorLabel(c);
+        main.appendChild(meta);
+      }
+
+      li.appendChild(main);
 
       const del = document.createElement('button');
       del.className = 'conv-del';
@@ -683,12 +769,29 @@
     // Guest: la sidebar e' nascosta, nessun motivo di chiamare /conversations
     // (sarebbe 401 comunque — protetto dal backend).
     if (isGuest) { convsCache = []; return convsCache; }
-    const res = await fetch('/conversations');
+    const res = await fetch('/conversations?scope=' + encodeURIComponent(currentScope));
     if (!res.ok) { convsCache = []; return convsCache; }
     convsCache = await res.json();
     renderConvList();
     return convsCache;
   }
+
+  scopeMine.addEventListener('click', async () => {
+    setScope('mine');
+    await loadList();
+    if (convId && !convsCache.some(c => c.id === convId)) {
+      setConvId(null);
+      history = [];
+      rerender();
+    } else {
+      renderConvList();
+    }
+  });
+  scopeAudit.addEventListener('click', async () => {
+    setScope('audit');
+    await loadList();
+    renderConvList();
+  });
 
   async function loadConv(id) {
     if (!id) { history = []; rerender(); return; }
@@ -765,6 +868,10 @@
   }
 
   newBtn.addEventListener('click', () => {
+    if (currentScope === 'audit') {
+      setScope('mine');
+      loadList();
+    }
     history = [];
     setConvId(null);
     rerender();
@@ -775,6 +882,7 @@
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (currentScope === 'audit') return;
     const message = input.value.trim();
     if (!message) return;
     input.value = '';
@@ -822,8 +930,10 @@
       typing.classList.remove('typing');
       typing.textContent = 'Errore: ' + err.message;
     } finally {
-      btn.disabled = false;
-      input.focus();
+      if (currentScope !== 'audit') {
+        btn.disabled = false;
+        input.focus();
+      }
     }
   });
 
@@ -831,6 +941,9 @@
     // Auth gate prima di qualsiasi fetch: decide modalita' guest vs owner.
     const authState = await BoardyAuth.state();
     isGuest = !authState.authenticated;
+    canAuditConversations = !!authState.can_audit_conversations;
+    setScope(currentScope);
+    convScope.hidden = isGuest || !canAuditConversations;
     BoardyAuth.mountBadge(document.querySelector('header'));
     if (isGuest) {
       document.body.classList.add('guest-mode');
@@ -864,8 +977,43 @@
   const modalCancel  = document.getElementById('modalCancel');
   const modalProgress = document.getElementById('modalProgress');
   const gameNames    = document.getElementById('gameNames');
-  let pendingFile = null;
+  const photoBtn     = document.getElementById('photoBtn');
+  const photoInput   = document.getElementById('photoInput');
+  let pendingFile = null;       // single PDF
+  let pendingImages = null;     // array of image File (photo OCR flow)
   let dragCounter = 0;
+
+  // Formati immagine supportati per l'OCR dei regolamenti: JPG, PNG, WebP.
+  const isImg = (f) => /^image\/(jpeg|png|webp)$/.test(f.type) || /\.(jpe?g|png|webp)$/i.test(f.name);
+  const isPdf = (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf');
+
+  // Apre il modal "Indicizza regolamento" con un'etichetta descrittiva.
+  // pendingFile / pendingImages vanno impostati PRIMA di chiamarla.
+  function openRulebookModal(labelText) {
+    modalFile.textContent = labelText;
+    modalGame.value = '';
+    modalProgress.textContent = '';
+    modalConfirm.disabled = false;
+    modalBack.classList.add('open');
+    modalGame.focus();
+  }
+
+  function startPhotosUpload(files) {
+    if (!files.length) return;
+    if (!files.every(isImg)) { alert('Formati supportati per le foto: JPG, PNG, WebP.'); return; }
+    pendingFile = null;
+    pendingImages = files;
+    const kb = files.reduce((s, f) => s + f.size, 0) / 1024;
+    openRulebookModal(`${files.length} foto (${kb.toFixed(0)} KB) → lettura OCR del regolamento`);
+  }
+
+  // Tasto 📷 accanto a Invia: apre il selettore file e poi il modal.
+  photoBtn.addEventListener('click', () => photoInput.click());
+  photoInput.addEventListener('change', () => {
+    const files = Array.from(photoInput.files || []);
+    photoInput.value = '';   // reset: permette di riselezionare gli stessi file
+    startPhotosUpload(files);
+  });
 
   async function refreshGameNames() {
     const res = await fetch('/games/names');
@@ -890,45 +1038,63 @@
     e.preventDefault();
     dragCounter = 0;
     dropOverlay.classList.remove('active');
-    const f = e.dataTransfer?.files?.[0];
-    if (!f) return;
-    if (!f.name.toLowerCase().endsWith('.pdf')) {
-      alert('Solo PDF supportati per ora.');
-      return;
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (!files.length) return;
+
+    if (files.length === 1 && isPdf(files[0])) {
+      // Single PDF → existing text-extraction flow.
+      pendingFile = files[0];
+      pendingImages = null;
+      openRulebookModal(`File: ${pendingFile.name} (${(pendingFile.size / 1024).toFixed(0)} KB)`);
+    } else if (files.every(isImg)) {
+      // One or more photos → vision OCR flow (read like any rulebook).
+      startPhotosUpload(files);
+    } else {
+      alert('Trascina UN PDF, oppure una o più foto del regolamento (JPG, PNG, WebP).');
     }
-    pendingFile = f;
-    modalFile.textContent = `File: ${f.name} (${(f.size / 1024).toFixed(0)} KB)`;
-    modalGame.value = '';
-    modalProgress.textContent = '';
-    modalConfirm.disabled = false;
-    modalBack.classList.add('open');
-    modalGame.focus();
   });
 
   function closeModal() {
     modalBack.classList.remove('open');
     pendingFile = null;
+    pendingImages = null;
   }
   modalCancel.addEventListener('click', closeModal);
   modalBack.addEventListener('click', (e) => { if (e.target === modalBack) closeModal(); });
 
   modalConfirm.addEventListener('click', async () => {
     const game = modalGame.value.trim();
-    if (!game || !pendingFile) return;
+    if (!game || (!pendingFile && !pendingImages)) return;
     modalConfirm.disabled = true;
-    modalProgress.textContent = 'Caricamento + indicizzazione (può richiedere 10–30s)…';
+
     const fd = new FormData();
     fd.append('game_name', game);
-    fd.append('file', pendingFile);
+    let url;
+    if (pendingImages) {
+      url = '/rulebooks/upload-photos';
+      pendingImages.forEach((f) => fd.append('files', f));
+      modalProgress.textContent = `Lettura di ${pendingImages.length} foto via OCR (può richiedere ~1s a foto)…`;
+    } else {
+      url = '/rulebooks/upload';
+      fd.append('file', pendingFile);
+      modalProgress.textContent = 'Caricamento + indicizzazione (può richiedere 10–30s)…';
+    }
+
     try {
-      const res = await fetch('/rulebooks/upload', { method: 'POST', body: fd });
+      const res = await fetch(url, { method: 'POST', body: fd });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
       const data = await res.json();
       closeModal();
-      addBubble(`📕 **${data.game}** indicizzato — ${data.pages} pagine, ${data.chunks} chunk. Ora puoi farmi domande sulle regole.`, 'bot');
+      let msg = `📕 **${data.game}** indicizzato — ${data.pages} pagine, ${data.chunks} chunk.`;
+      const warnings = data.warnings || [];
+      if (warnings.length) {
+        msg += `\n\n⚠️ **Da controllare:**\n` + warnings.map((w) => `- ${w}`).join('\n');
+      }
+      msg += `\n\nOra puoi farmi domande sulle regole.`;
+      addBubble(msg, 'bot');
     } catch (err) {
       modalProgress.textContent = 'Errore: ' + err.message;
       modalConfirm.disabled = false;

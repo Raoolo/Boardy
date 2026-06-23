@@ -328,6 +328,19 @@ def _migrate_v9_rulebook_pdf_blob(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE rulebooks ADD COLUMN pdf_blob BLOB")
 
 
+def _migrate_v10_rulebook_ocr_report(conn: sqlite3.Connection) -> None:
+    """v10: store the OCR ingest report (`rulebooks.ocr_report`, JSON text).
+
+    Decision (2026-06-23): rulebooks can now be ingested from PHOTOS via a vision
+    model (see `app/ocr.py`). Unlike a clean PDF, a photo scan carries quality
+    caveats — illegible pages, missing page numbers, detected gaps. We persist
+    that report next to the rulebook so the UI/bot can re-show "what was read and
+    what to recheck" later. NULL for PDF-sourced rulebooks. Idempotent.
+    """
+    if not _has_column(conn, "rulebooks", "ocr_report"):
+        conn.execute("ALTER TABLE rulebooks ADD COLUMN ocr_report TEXT")
+
+
 def migrate() -> None:
     with get_conn() as conn:
         # If `games` doesn't exist at all, nothing to do — ETL will create it.
@@ -366,5 +379,8 @@ def migrate() -> None:
 
         # v9: store raw PDF bytes inside rulebooks (DB-as-single-source).
         _migrate_v9_rulebook_pdf_blob(conn)
+
+        # v10: store the OCR ingest report for photo-sourced rulebooks.
+        _migrate_v10_rulebook_ocr_report(conn)
 
         conn.commit()

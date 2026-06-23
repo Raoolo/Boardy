@@ -3,13 +3,18 @@
 Reads sheet 'Elenco Premium' from `data/ElencoGiochi.xlsx`, parses the messy
 SLEEVE column with regex, and upserts into the SQLite database at `boardy.db`.
 
-Upsert semantics (since 2026-05-04):
-- Games are matched by `name`. Existing rows have their ETL-managed columns
-  overwritten (players, duration, complexity, condition, sleeve_status); all
-  other columns (bgg_id, description, embeddings, etc. populated by chat / BGG
-  backfill) are preserved.
+One-time bootstrap (since 2026-06-23):
+- This script is a ONE-TIME bootstrap to populate the DB from the Excel the
+  first time. Afterwards the DB is the source of truth (chat/UI edits, BGG
+  enrichment, hand-verified sleeve status). Re-running it would clobber that
+  work, so it REFUSES on a non-empty `games` table unless `--force` is passed.
+
+Upsert semantics (since 2026-05-04, sleeve carve-out 2026-06-23):
+- Games are matched by `name`. EXISTING rows get only players, duration,
+  complexity, condition refreshed. `sleeve_status` and `sleeve_requirements`
+  are NO LONGER overwritten on existing games — they are owned by the DB
+  (hand-verified via chat/UI). New games (INSERT) still take both from Excel.
 - Designers/publishers bridges are rebuilt only for games present in Excel.
-- `sleeve_requirements` rows are rebuilt only for games present in Excel.
 - Games NOT in Excel (e.g. chat-added ones like Concordia) are left untouched.
 - Inventory, conversations, audit log, dim tables (categories/mechanics that
   aren't touched by Excel) are never modified.
@@ -17,13 +22,16 @@ Upsert semantics (since 2026-05-04):
 Schema is created with CREATE IF NOT EXISTS — destructive DDL was dropped to
 make re-imports safe. App boot (`app.schema.migrate()`) handles v3+ migrations.
 
-Run:
+Run (first time only):
     uv run python etl/import_excel.py
+Force a re-run against an already-populated DB (sleeve data still preserved):
+    uv run python etl/import_excel.py --force
 """
 from __future__ import annotations
 
 import re
 import sqlite3
+import sys
 from pathlib import Path
 
 import openpyxl
@@ -229,6 +237,21 @@ def main() -> None:
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
 
+    # One-time bootstrap guard. The Excel import populates the DB the FIRST time;
+    # afterwards the DB is the source of truth (chat/UI edits, BGG enrichment,
+    # hand-verified sleeve status). Re-running would overwrite that work, so we
+    # refuse on an already-populated `games` table unless --force is given.
+    force = "--force" in sys.argv
+    already = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+    if already and not force:
+        raise SystemExit(
+            f"DB già popolato ({already} giochi): l'import Excel è un bootstrap "
+            "una-tantum, il DB è ora la fonte di verità.\n"
+            "Per (ri)eseguirlo davvero: uv run python etl/import_excel.py --force\n"
+            "Nota: anche con --force, sleeve_status e sleeve_requirements dei "
+            "giochi ESISTENTI restano intatti (gestiti dal DB, non dall'Excel)."
+        )
+
     unparsed: list[str] = []
     inserted = 0
     updated = 0
@@ -271,18 +294,23 @@ def main() -> None:
         ).fetchone()
         if existing:
             game_id = existing["id"]
+            # NB: sleeve_status NON è più nella UPDATE. È gestito dal DB
+            # (verifica a mano via chat/UI); l'Excel non deve azzerarlo a
+            # `unknown` ad ogni re-import. Vedi docstring + sleeve_requirements
+            # sotto (rebuild solo per i giochi nuovi).
             conn.execute(
                 """UPDATE games
                    SET players_min=?, players_max=?, players_best=?,
                        duration_min=?, complexity_label=?, condition=?,
-                       sleeve_status=?, updated_at=CURRENT_TIMESTAMP
+                       updated_at=CURRENT_TIMESTAMP
                    WHERE id=?""",
                 (
                     p_min, p_max, players_raw, duration,
-                    complexity, condition, status, game_id,
+                    complexity, condition, game_id,
                 ),
             )
             updated += 1
+            is_new = False
         else:
             cur = conn.execute(
                 """INSERT INTO games(name, players_min, players_max, players_best,
@@ -296,6 +324,7 @@ def main() -> None:
             )
             game_id = cur.lastrowid
             inserted += 1
+            is_new = True
 
         # Rebuild designers/publishers bridges for THIS game only.
         # Chat-only games (not in Excel) keep their bridges intact.
@@ -310,20 +339,22 @@ def main() -> None:
                 pid = _upsert_dim(conn, "publishers", p)
                 conn.execute("INSERT OR IGNORE INTO game_publishers(game_id, publisher_id) VALUES(?,?)", (game_id, pid))
 
-        # Rebuild sleeve_requirements for THIS game only.
-        conn.execute("DELETE FROM sleeve_requirements WHERE game_id=?", (game_id,))
-        # Invariant: sleeved/na games must not carry pending requirements rows.
-        # `classify_sleeve` already enforces this, but we double-check here so a
-        # future regression doesn't silently re-introduce phantom sleeves.
-        if status in ("sleeved", "na"):
-            reqs = []
-        for count, w, h, note in reqs:
-            conn.execute(
-                """INSERT INTO sleeve_requirements(game_id, count, width_mm, height_mm, note)
-                   VALUES(?,?,?,?,?)""",
-                (game_id, count, w, h, note),
-            )
-            req_count += 1
+        # Build sleeve_requirements ONLY for NEW games. For existing games the
+        # sleeve TODO list is owned by the DB (hand-verified): re-importing must
+        # not wipe it back to the Excel-derived guess.
+        if is_new:
+            # Invariant: sleeved/na games must not carry pending requirements rows.
+            # `classify_sleeve` already enforces this, but we double-check here so
+            # a future regression doesn't silently re-introduce phantom sleeves.
+            if status in ("sleeved", "na"):
+                reqs = []
+            for count, w, h, note in reqs:
+                conn.execute(
+                    """INSERT INTO sleeve_requirements(game_id, count, width_mm, height_mm, note)
+                       VALUES(?,?,?,?,?)""",
+                    (game_id, count, w, h, note),
+                )
+                req_count += 1
 
     # Count games in DB but NOT in Excel — these were preserved (chat-added etc.).
     if excel_names:
