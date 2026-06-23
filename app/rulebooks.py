@@ -62,6 +62,48 @@ def detect_language(text: str) -> str:
     lang, _score = py3langid.classify(sample[:10000])
     return (lang or "?").upper()
 
+
+# Lingue latine europee OLTRE l'allowlist: e5+DeepSeek le gestiscono in modo
+# imperfetto ma USABILE → un regolamento corretto in queste lingue è meglio di
+# nessun regolamento, quindi passano con un WARNING invece di un hard-reject.
+# Tutto il resto fuori dall'allowlist (script non latini: thai/CJK/cirillico/
+# greco/arabo…) è inutilizzabile per il Q&A → hard-reject quando enforce_lang.
+_SOFT_LANGS = {"NL", "PL", "CS", "SK", "SL", "HR", "RO", "HU", "FI", "SV",
+               "DA", "NO", "IS", "ET", "LV", "LT", "CA", "GL", "EU", "AF", "TR"}
+
+
+def classify_rulebook_language(text: str) -> dict:
+    """Decide cosa fare della lingua di un regolamento estratto.
+
+    Ritorna `{lang, allowed, soft, usable}`:
+      - allowed: lingua nell'allowlist (EN/IT/ES/DE/FR/PT) → ottimale.
+      - soft:    latina europea fuori allowlist (NL/PL/…) → usabile con warning.
+      - usable:  allowed OR soft OR lang sconosciuta ('?') → NON hard-reject.
+                 False solo per script chiaramente ingestibili (thai/CJK/…).
+    Separa "in che lingua è" (game-agnostic) dalla POLICY (decisa dal chiamante
+    in base a enforce_lang).
+    """
+    lang = detect_language(text)
+    allowed = lang in allowed_rulebook_langs()
+    soft = (not allowed) and lang in _SOFT_LANGS
+    usable = allowed or soft or lang == "?"
+    return {"lang": lang, "allowed": allowed, "soft": soft, "usable": usable}
+
+
+def _game_name_in_text(canonical: str, pages: list[tuple[int, str]]) -> bool:
+    """True se un token significativo del nome gioco compare nelle prime pagine.
+
+    Segnale DEBOLE (solo warning, mai hard-reject): cattura il caso "manuale del
+    gioco sbagliato" (es. un PDF di «Trails» indicizzato sotto «Barrage») quando
+    il nome non compare affatto. Token < 4 char ignorati per evitare match a caso;
+    se non restano token (nome cortissimo) ritorna True (non possiamo giudicare).
+    """
+    tokens = [w for w in _norm_name(canonical).split() if len(w) >= 4]
+    if not tokens:
+        return True
+    sample = " ".join(t for _, t in pages[:3]).lower()
+    return any(w in sample for w in tokens)
+
 _model: SentenceTransformer | None = None
 
 
@@ -229,13 +271,24 @@ def _store_rulebook(
     return rb_id, len(chunks)
 
 
-def ingest_bytes(game_name: str, data: bytes, *, source: str) -> dict:
+def ingest_bytes(game_name: str, data: bytes, *, source: str,
+                 enforce_lang: bool = True) -> dict:
     """Index a rulebook from raw PDF bytes; stores the PDF itself in the DB.
 
     `source` is a stable handle (file path or origin URL) used for dedup via
     UNIQUE(game_id, source_path): re-ingesting the same source replaces the row.
     The bytes are persisted in `rulebooks.pdf_blob` so boardy.db is the single
     source of truth (no on-disk PDF needed).
+
+    `enforce_lang` (default True): hard-reject manuals in an UNUSABLE language
+    (non-Latin script the LLM can't answer from — thai/CJK/…). Set False for
+    user-confirmed flows (explicit download/upload): the unusable case becomes a
+    warning instead, so the owner can override. Latin-script European languages
+    outside the allowlist (NL/PL/…) are ALWAYS soft (warning, never rejected).
+    Returns `warnings: list[str]` alongside the result so the chat can surface
+    them. Note: this is the LANGUAGE/usability gate only — the GAME-MATCH
+    (does the PDF belong to this game?) integrity check lives upstream in
+    `download_rulebook` (deterministic, via bgg_id/source provenance).
     """
     import io
     try:
@@ -254,19 +307,33 @@ def ingest_bytes(game_name: str, data: bytes, *, source: str) -> dict:
             return {"error": "no extractable text in PDF (might be a scanned image — "
                              "carica delle foto del regolamento per l'OCR)"}
 
-        # Language gate: reject manuals NOT in a well-supported language. The
-        # 1j1ju filename suffix lies (French site), so we sniff the real text.
-        allowed = allowed_rulebook_langs()
-        lang = detect_language("\n".join(t for _, t in pages))
-        if lang != "?" and lang not in allowed:
-            return {
-                "error": (f"regolamento in lingua non supportata ({lang}); "
-                          f"Boardy indicizza solo {', '.join(sorted(allowed))}. "
-                          "Cerca un'altra edizione (EN consigliata) o carica le foto "
-                          "del regolamento nella lingua giusta."),
-                "detected_lang": lang,
-                "allowed_langs": sorted(allowed),
-            }
+        warnings: list[str] = []
+
+        # Language gate (the filename suffix lies — 1j1ju is French — so we sniff
+        # the real text). allowed → ok; soft (Latin-EU) → warning; unusable
+        # (non-Latin) → hard-reject only when enforce_lang, else warning.
+        cls = classify_rulebook_language("\n".join(t for _, t in pages))
+        if cls["soft"]:
+            warnings.append(f"regolamento in {cls['lang']}: lingua non primaria, "
+                            "le risposte potrebbero essere meno precise.")
+        elif not cls["usable"]:
+            if enforce_lang:
+                return {
+                    "error": (f"regolamento in lingua non utilizzabile ({cls['lang']}); "
+                              f"Boardy indicizza bene solo {', '.join(sorted(allowed_rulebook_langs()))}. "
+                              "Cerca un'altra edizione (EN consigliata) o carica le foto."),
+                    "detected_lang": cls["lang"],
+                    "allowed_langs": sorted(allowed_rulebook_langs()),
+                }
+            warnings.append(f"⚠️ regolamento in {cls['lang']} (lingua che e5/DeepSeek "
+                            "gestiscono male): indicizzato su tua conferma, le regole "
+                            "potrebbero non essere recuperabili bene.")
+
+        # Soft game-match fallback: il testo non menziona il gioco → possibile
+        # manuale sbagliato. Solo warning (la verifica forte è in download_rulebook).
+        if not _game_name_in_text(canonical, pages):
+            warnings.append(f"il testo del PDF non menziona «{canonical}» nelle prime "
+                            "pagine — verifica che sia davvero il suo regolamento.")
 
         try:
             rb_id, n_chunks = _store_rulebook(
@@ -283,6 +350,8 @@ def ingest_bytes(game_name: str, data: bytes, *, source: str) -> dict:
         "chunks": n_chunks,
         "bytes": len(data),
         "model": EMBED_MODEL_NAME,
+        "detected_lang": cls["lang"],
+        "warnings": warnings,
     }
 
 
@@ -331,18 +400,20 @@ def ingest_pages(
     }
 
 
-def ingest(game_name: str, pdf_path: str) -> dict:
+def ingest(game_name: str, pdf_path: str, *, enforce_lang: bool = False) -> dict:
     """Parse a local PDF rulebook and index it under the matching game.
 
     Thin wrapper over `ingest_bytes` — reads the file, then stores its bytes in
     the DB (the on-disk file is no longer the source of truth, just the input).
+    `enforce_lang=False` by default: a local file is an explicit user choice, so
+    an unusable language is a warning, not a hard reject.
     """
     p = Path(pdf_path).expanduser().resolve()
     if not p.exists():
         return {"error": f"file not found: {p}"}
     if not p.suffix.lower() == ".pdf":
         return {"error": "expected a .pdf file"}
-    return ingest_bytes(game_name, p.read_bytes(), source=str(p))
+    return ingest_bytes(game_name, p.read_bytes(), source=str(p), enforce_lang=enforce_lang)
 
 
 def get_pdf(game_name: str) -> tuple[str, bytes] | None:

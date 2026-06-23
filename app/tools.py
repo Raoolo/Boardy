@@ -1110,24 +1110,63 @@ def _fetch_pdf_bytes(url: str, *, max_bytes: int = 30 * 1024 * 1024) -> dict:
     return {"ok": True, "data": data}
 
 
+def _resolve_game_bgg_id(game_name: str) -> tuple[str | None, int | None]:
+    """(canonical_name, bgg_id) for `game_name`, tolerant resolution. (None,None)
+    if the game isn't in the DB."""
+    from . import rulebooks
+    with get_conn() as conn:
+        g = rulebooks._resolve_game(conn, game_name)
+        if not g:
+            return None, None
+        row = conn.execute("SELECT name, bgg_id FROM games WHERE id=?", (g["id"],)).fetchone()
+    if not row:
+        return g["name"], None
+    return row["name"], row["bgg_id"]
+
+
 def download_rulebook(game_name: str, url: str | None = None,
-                      bgg_filepageid: int | None = None, _source: str | None = None) -> dict:
+                      bgg_filepageid: int | None = None, override: bool = False,
+                      _source: str | None = None) -> dict:
     """Download a rulebook and index it under `game_name`. Provide EITHER `url`
     (a direct .pdf, e.g. a 1j1ju candidate) OR `bgg_filepageid` (a BGG Files
     candidate — fetched via headless browser + BGG login).
 
-    One confirmed action = download + ingest (propose first, then on the user's
-    OK). The PDF bytes go into the DB (no on-disk file). The game must exist.
-    Use `ingest_rulebook` for a local file.
+    GAME-MATCH (integrity): a `bgg_filepageid` is accepted only if it belongs to
+    THIS game's BGG entry (`bgg_files_api.find_rulebooks(game.bgg_id)`). This is
+    the deterministic check that prevents indexing the WRONG game's manual (the
+    real Barrage/Trails bug). Pass `override=true` ONLY when you're certain and
+    the check is a false negative. The language gate runs in soft mode here (a
+    user-confirmed download): unusable languages become a warning, not a reject —
+    see `warnings` in the result.
+
+    One confirmed action = download + ingest. PDF bytes go into the DB. Game must
+    exist. Use `ingest_rulebook` for a local file.
     """
     from . import rulebooks
+    canonical, game_bgg_id = _resolve_game_bgg_id(game_name)
 
     if bgg_filepageid:
+        # GAME-MATCH: the filepage must be among the game's own BGG files.
+        if game_bgg_id and not override:
+            try:
+                from etl import bgg_files_api
+                valid = {int(f["filepageid"]) for f in bgg_files_api.find_rulebooks(int(game_bgg_id))
+                         if f.get("filepageid") is not None}
+            except Exception:
+                valid = None  # discovery down → can't verify, don't block
+            if valid is not None and int(bgg_filepageid) not in valid:
+                return {"error": (f"game-match fallito: il file BGG {bgg_filepageid} non risulta "
+                                  f"tra i regolamenti di «{canonical or game_name}» (bgg {game_bgg_id}) "
+                                  "→ probabile gioco sbagliato. Usa un candidato di find_rulebook per "
+                                  "questo gioco, oppure passa override=true se sei certo."),
+                        "bgg_filepageid": bgg_filepageid, "game_match": "none"}
         from etl.bgg_browser import fetch_one
         r = fetch_one(int(bgg_filepageid))
         if "error" in r:
             return {"error": r["error"], "bgg_filepageid": bgg_filepageid}
-        result = rulebooks.ingest_bytes(game_name, r["data"], source=f"bgg:filepage/{bgg_filepageid}")
+        result = rulebooks.ingest_bytes(game_name, r["data"],
+                                        source=f"bgg:filepage/{bgg_filepageid}",
+                                        enforce_lang=False)
         result["bgg_filepageid"] = bgg_filepageid
         return result
 
@@ -1136,8 +1175,10 @@ def download_rulebook(game_name: str, url: str | None = None,
     dl = _fetch_pdf_bytes(url)
     if "error" in dl:
         return dl
+    # No deterministic provenance for arbitrary URLs → ingest_bytes' content-based
+    # name check warns if the PDF text doesn't mention the game (wrong-game guard).
     # source=url → re-download replaces the row via UNIQUE(game_id, source_path)
-    result = rulebooks.ingest_bytes(game_name, dl["data"], source=url)
+    result = rulebooks.ingest_bytes(game_name, dl["data"], source=url, enforce_lang=False)
     result["url"] = url
     return result
 
@@ -2142,7 +2183,10 @@ TOOLS = [
             "Provide EITHER `url` (a 1j1ju/web direct .pdf) OR `bgg_filepageid` (a "
             "BGG Files candidate — fetched via headless browser + BGG login). The game "
             "must already exist. Call ONLY after the user confirmed the candidate "
-            "from `find_rulebook`. For a local file use `ingest_rulebook`."
+            "from `find_rulebook`. A `bgg_filepageid` is rejected if it doesn't belong "
+            "to this game's BGG entry (wrong-game guard); set `override=true` only if "
+            "you're sure it's a false negative. Check `warnings` in the result and relay "
+            "them. For a local file use `ingest_rulebook`."
         ),
         "input_schema": {
             "type": "object",
@@ -2150,6 +2194,7 @@ TOOLS = [
                 "game_name":  {"type": "string"},
                 "url":            {"type": "string", "description": "Direct link to a .pdf (1j1ju/web candidate)."},
                 "bgg_filepageid": {"type": "integer", "description": "BGG Files filepage id (bgg candidate)."},
+                "override":       {"type": "boolean", "description": "Bypass the game-match check (use only if certain it's a false negative)."},
             },
             "required": ["game_name"],
         },
