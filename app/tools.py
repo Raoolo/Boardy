@@ -844,6 +844,124 @@ def ingest_rulebook(game_name: str, pdf_path: str) -> dict:
     return rulebooks.ingest(game_name, pdf_path)
 
 
+def ingest_rulebook_photos(game_name: str, images: list[bytes]) -> dict:
+    """Read photos of a physical rulebook via vision OCR and index them.
+
+    Shared orchestration for the web endpoint and the Telegram bot:
+      1. OCR each photo (`app/ocr.transcribe_images`) → text + diagram descriptions,
+         printed page number, legibility verdict.
+      2. Order the pages (input order — users shoot in sequence), derive citation
+         page numbers from the printed numbers when present.
+      3. Detect quality problems: blurry/illegible pages, gaps in the printed page
+         numbering, photos that don't look like rulebook pages.
+      4. Assemble the photos into a PDF (`pdf_blob`) so `get_pdf` still works.
+      5. Index via `rulebooks.ingest_pages` (same chunk/embed/store as PDFs).
+
+    Returns the ingest result plus `warnings`, `gaps` and `low_quality_pages` so the
+    caller can tell the user what was read and what to recheck. Lazy imports keep the
+    embedding model / Gemini / Pillow off the server-boot path.
+    """
+    import io
+    import json
+    import time
+
+    from . import ocr, rulebooks
+
+    if not images:
+        return {"error": "nessuna foto ricevuta"}
+
+    pages_ocr = ocr.transcribe_images(images, game_name)
+
+    warnings: list[str] = []
+    low_quality_pages: list[int] = []
+    kept: list[dict] = []   # photos that look like rulebook pages, in input order
+
+    for idx, p in enumerate(pages_ocr, start=1):
+        if not p.get("looks_like_rulebook_page", True):
+            warnings.append(f"Foto {idx} ignorata: non sembra una pagina di regolamento.")
+            continue
+        if p.get("error"):
+            warnings.append(f"Foto {idx}: errore di lettura, riprova a ricaricarla.")
+        if p.get("legibility") == "poor":
+            low_quality_pages.append(idx)
+        for issue in (p.get("issues") or [])[:2]:
+            warnings.append(f"Foto {idx}: {issue}")
+        kept.append(p)
+
+    if low_quality_pages:
+        nums = ", ".join(str(n) for n in low_quality_pages)
+        warnings.append(f"Foto poco leggibili (sfocate/riflessi): {nums}. Rifalle per una lettura migliore.")
+
+    # Gap detection over the PRINTED page numbers (independent of shooting order).
+    printed = sorted({p["page_number_printed"] for p in kept
+                      if isinstance(p.get("page_number_printed"), int)})
+    gaps: list[int] = []
+    if len(printed) >= 2:
+        gaps = [n for n in range(printed[0], printed[-1] + 1) if n not in printed]
+        if gaps:
+            warnings.append("Sembrano mancare delle pagine: " + ", ".join(map(str, gaps)) + ".")
+    elif not printed:
+        warnings.append("Nessun numero di pagina visibile: non posso verificare se mancano pagine.")
+
+    # Build (citation_page, text) pairs. Prefer the printed number for citation
+    # fidelity; fall back to a running counter for un-numbered pages.
+    pages: list[tuple[int, str]] = []
+    running = 0
+    for p in kept:
+        text = (p.get("text_markdown") or "").strip()
+        if not text:
+            continue
+        n = p.get("page_number_printed")
+        if isinstance(n, int):
+            running = n
+        else:
+            running += 1
+        pages.append((running, text))
+
+    if not pages:
+        return {"error": "Non sono riuscito a leggere testo dalle foto. "
+                         "Rifai le foto più a fuoco e con buona luce.",
+                "warnings": warnings}
+
+    # Assemble the source photos into a single PDF for the rulebook blob.
+    pdf_blob = b""
+    try:
+        from PIL import Image
+        imgs = []
+        for b in images:
+            try:
+                imgs.append(Image.open(io.BytesIO(b)).convert("RGB"))
+            except Exception:
+                pass
+        if imgs:
+            buf = io.BytesIO()
+            imgs[0].save(buf, format="PDF", save_all=True, append_images=imgs[1:])
+            pdf_blob = buf.getvalue()
+    except Exception:
+        pass  # blob is best-effort; the chunks/embeddings are what power search
+
+    report = {
+        "warnings": warnings,
+        "gaps": gaps,
+        "low_quality_pages": low_quality_pages,
+        "photos": len(images),
+        "pages_used": len(pages),
+    }
+    source = f"photos:{rulebooks._norm_name(game_name).replace(' ', '-')}:{int(time.time())}"
+    result = rulebooks.ingest_pages(
+        game_name, pages, source=source, pdf_blob=pdf_blob,
+        ocr_report=json.dumps(report, ensure_ascii=False),
+    )
+    if "error" in result:
+        result.setdefault("warnings", warnings)
+        return result
+
+    result["warnings"] = warnings
+    result["gaps"] = gaps
+    result["low_quality_pages"] = low_quality_pages
+    return result
+
+
 def ask_rules(game_name: str, question: str, k: int = 5) -> dict:
     """Return top-k rulebook excerpts most relevant to the question.
 

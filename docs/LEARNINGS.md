@@ -12,6 +12,22 @@ Append, don't rewrite. Newest entries on top.
 
 ---
 
+## 2026-06-23 — Regolamenti da FOTO via OCR (visione Gemini, non DeepSeek)
+
+**Obiettivo.** Fotografare le pagine di un regolamento fisico e indicizzarlo come gli altri (prima si poteva solo da PDF con testo estraibile; i PDF scansionati venivano rifiutati — vedi limiti 1j1ju più sotto). Deve funzionare da sito e da Telegram, avvisare su foto poco chiare e pagine mancanti, ed essere cost-efficient.
+
+**Vincolo scoperto: DeepSeek non vede.** `api.deepseek.com` (`deepseek-chat`) è **solo testo**: non esiste un modello di visione/OCR sulla loro API. Quindi "restare su DeepSeek" per l'OCR è impossibile. Decisione: tenere DeepSeek come cervello per chat/Q&A/tag/titoli/`/library/filter` e usare un modello di visione **solo** per il passo foto→testo. Scelto **Google Gemini** (`gemini-2.5-flash`, nuova `GEMINI_API_KEY` gratuita da AI Studio): costo ~pochi centesimi per un regolamento intero, ottimo su foto storte/colonne/icone.
+
+**Perché visione-LLM e non Tesseract.** Il TODO storico diceva `pytesseract`. Ma su foto reali di regolamenti (multi-colonna, icone fitte, luce/angolo imperfetti) Tesseract rende male. Un LLM di visione, oltre a trascrivere, **descrive a parole diagrammi/icone/tabelle** → quel testo entra nel RAG e5 esistente e diventa cercabile (es. «[Diagramma: 3 habitat: Foresta | Prateria | Stagno]»). Confermato su una pagina sintetica: numero pagina, testo e descrizione diagramma letti correttamente.
+
+**Architettura (riuso, non duplicazione).** `app/ocr.py` (`transcribe_images`, 1 call Gemini per foto, output JSON via `response_schema` Pydantic, retry su 503/429 transitori) → `app/tools.ingest_rulebook_photos` (ordina per ordine di scatto, ricava numeri pagina stampati per la citazione, **rileva buchi** nella numerazione, raccoglie avvisi `legibility=poor`, assembla le foto in un PDF con Pillow per `pdf_blob`) → `rulebooks.ingest_pages` (nuovo; condivide `_store_rulebook` con `ingest_bytes` → stesso chunk/embed/store). Schema **v10**: colonna `rulebooks.ocr_report` (JSON con warnings/gaps). Una call per foto (non batch): tiene numero-pagina e verdetto-qualità non ambigui.
+
+**Interfacce.** Web: tasto **📷 accanto a Invia** (apre il file-picker) + drag-drop di più immagini; modal scelta gioco; `POST /rulebooks/upload-photos` (owner-only). Telegram: foto con didascalia «regolamento di X» **oppure** `/regolamento <gioco>` + foto + `/fine`; gli album Telegram arrivano come update separati con lo stesso `media_group_id` → bufferizzati con **debounce asyncio** (no job-queue, niente dipendenze extra).
+
+**Formati supportati: JPG/JPEG, PNG, WebP** (validati nel backend con messaggio chiaro; max 40 foto, 15 MB/foto). HEIC (iPhone) **non** supportato: lo è di fatto, perché Telegram invia JPEG e la condivisione/upload da iPhone in genere converte; se serve davvero, aggiungere `pillow-heif` + mime corretto per Gemini.
+
+**Gotcha.** (1) Gemini può rispondere **503 "high demand"** in modo transitorio: senza retry una foto verrebbe segnata "illeggibile" per sbaglio → aggiunto retry con backoff in `ocr.py` (solo errori transitori; un 400/401 fallisce subito). (2) Deps nuove (`google-genai`, `pillow`) → sul server serve **`up -d --build`**, non `restart`. (3) `surfacesrvr` È il server: il `.env` del repo è bind-montato nel container, quindi basta mettere `GEMINI_API_KEY` lì. **Bonus**: lo stesso `app/ocr.py` può in futuro sbloccare i PDF scansionati (rasterizza pagine → stesse call).
+
 ## 2026-06-21 — Buste: 2ª fonte BGG `cardsetsbygame` (sblocca i giochi nuovi tipo Intarsia)
 
 **Sintomo.** Aggiungendo **Intarsia** (bgg 422126) da chat, il bot diceva che "non ha carte". Falso: ha 81 carte 44×68 e l'info è su BGG (pagina `/boardgame/422126/intarsia/sleeves`). Causa doppia: (1) l'unica fonte buste automatica era **sleeveyourgames** (`etl/syg_api`), che NON ha i giochi troppo nuovi → `found:false`; (2) il modello interpretava `found:false` come "il gioco non ha carte" e lo riferiva all'utente.
@@ -108,6 +124,16 @@ Scoperta costosa, da non ri-derivare. **(a) Elencare i file di un gioco è APERT
 
 ---
 
+## 2026-06-23 — Chat ownership + Telegram guest persistiti
+
+**Ownership conversazioni.** `conversations` ha metadata `origin`, `actor_role`, `actor_id`, `actor_name`. `/conversations` senza query usa `scope=mine`; `scope=audit` mostra tutto solo a ruoli `owner`/`admin`. La UI `/` ha toggle `Mie/Audit`; Audit disabilita il composer. Il backend non si fida della UI: `GET/DELETE /conversations/{id}` controllano ownership o permesso audit, e `POST /chat` rifiuta di continuare chat altrui (`403`).
+
+**Migrazione dati.** Vecchie chat web senza proprietario assegnate a `raulo`. `conversation_id=30` è Telegram owner raulo; `31` è Telegram guest `kawatorio`, recuperata dalla RAM prima del restart.
+
+**Telegram guest ora persistiti.** Il bot chiama `/chat` con `persist_guest=true`; il testo finisce in `conversations`, mentre `data/telegram_chats.json` salva solo mapping `chat_id → {role, conversation_id}`. Questo cambia il profilo privacy: serve policy GDPR/retention/forget-me prima di esporre Boardy a più persone.
+
+**Healthcheck Telegram.** Il container `telegram-bot` usa la stessa immagine del web server, ma non espone HTTP. L'healthcheck del Dockerfile controlla `http://127.0.0.1:8765/`, quindi sul bot dava falso `unhealthy`. Fix: `deploy/docker-compose.yml` disabilita l'healthcheck sul servizio `telegram-bot`; per applicarlo serve ricreare quel servizio (`up -d --no-build telegram-bot`), non basta `restart`.
+
 ## 2026-05-20 — Telegram bot come thin client di `POST /chat`
 
 Implementato `bot/telegram_bot.py` (PTB v21, async). Scelte di design che vale la pena ricordare:
@@ -118,9 +144,9 @@ Implementato `bot/telegram_bot.py` (PTB v21, async). Scelte di design che vale l
 
 **Due client httpx separati per owner vs guest.** Mantiene il cookie owner in un `AsyncClient` long-lived; per i guest crea un `AsyncClient` one-shot. Motivo: paranoia. Se la stessa chat passa owner→guest (cambio env, rimozione di un user_id), zero chance di portare avanti il cookie owner per errore.
 
-**Persistenza mapping `chat_id → conv_id` su JSON file, non DB.** File `<BOARDY_DB dir>/telegram_chats.json`. Sta nel named volume con il DB → sopravvive ai restart container. Alternative scartate: (a) tabella in `boardy.db` — overkill per un dict piatto e mette il bot in dipendenza dallo schema (migrate, ecc.); (b) solo in-memoria — restart perde la conv attiva, UX bruttina.
+**Persistenza mapping Telegram su JSON file, non DB.** File `<BOARDY_DB dir>/telegram_chats.json`. Dal 2026-06-23 il formato è `chat_id → {role, conversation_id}`; prima era `chat_id → conv_id`. Sta in `/data` con il DB → sopravvive ai restart container. Il testo vero della chat vive in `conversations`.
 
-**Guest history NON persistita.** Specchia il web frontend che usa `sessionStorage`. Restart bot = history guest perse, by design.
+**Nota storica superata.** In origine la guest history Telegram NON era persistita e viveva in memoria come `sessionStorage`. Dal 2026-06-23 è cambiato: i guest Telegram sono persistiti in `conversations` con metadata Telegram; i guest web restano ephemeri in `sessionStorage`.
 
 **Fallback Markdown → plain text.** Telegram parse_mode legacy "Markdown" tollera molto, ma occasionalmente fallisce su asterischi non bilanciati o URL strani. `try: parse_mode=MARKDOWN / except: plain` evita di perdere risposte legittime.
 
@@ -161,11 +187,11 @@ passlib legge `bcrypt.__about__.__version__` per il sniffing; in bcrypt 5 quell'
 
 Se in futuro vuoi argon2 (più moderno di bcrypt), usa `argon2-cffi` diretto invece di tornare a passlib.
 
-### Decisione — guest chat = ephemera client-side (no DB write)
+### Decisione — guest chat web = ephemera client-side (no DB write)
 
 Discusso GDPR per chat guest. Salvare chat anonime senza consenso = violazione (art. 6 GDPR — il testo può contenere PII tipo "il mio amico Marco vuole giocare a..."). Tre opzioni: (a) ephemera in `sessionStorage`, (b) full GDPR (banner consenso + `/privacy` + retention + purge script + cookie session per right-to-delete), (c) niente chat per guest.
 
-**Scelto (a)**. Costo compliance = 0, prezzo = nessuna analytics su cosa chiedono i guest. Se in futuro le analytics diventano interessanti, c'è già una TODO con la lista dei pezzi da aggiungere — meglio aggiungere superficie di compliance quando serve davvero, non "tanto un domani".
+**Scelto (a)** per il web. Costo compliance = 0, prezzo = nessuna analytics su cosa chiedono i guest web. Dal 2026-06-23 Telegram è l'eccezione: le chat guest Telegram sono persistite per sopravvivere ai restart del bot, quindi va chiusa la TODO GDPR/privacy prima di uso pubblico ampio.
 
 ### Pattern — explicit `WRITE_TOOLS` set invece di euristica `_source`
 

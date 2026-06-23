@@ -11,7 +11,7 @@ Miniguida operativa per il bot Telegram. Setup, comandi, troubleshooting. Per il
 - **Processo separato** dal server web. Crash del bot → la web app vive lo stesso. Restart indipendente.
 - **Allow-list owner** = lista di `user_id` Telegram (interi). Chi è dentro parla con Boardy come owner (write tools). Chi è fuori parla come guest (read-only).
 - **Owner**: il bot fa `POST /auth/login` a Boardy con `BOARDY_BOT_USERNAME`/`PASSWORD`, prende il cookie, lo riusa. Una conv Boardy persistente per chat Telegram.
-- **Guest**: nessun cookie. History tenuta in memoria del bot. Restart bot = guest perdono il contesto (come `sessionStorage` del web).
+- **Guest**: nessun cookie, read-only, ma history persistita lato Boardy con metadata Telegram (`origin=telegram`, `actor_role=guest`, `actor_id=<telegram user_id>`, `actor_name=<username/nome>`). Restart bot = contesto conservato.
 
 ---
 
@@ -73,6 +73,9 @@ uv run python -m bot.telegram_bot
 | `/new` | Reset conversazione corrente (azzera storico per QUESTA chat) |
 | `/whoami` | Mostra il tuo `user_id` Telegram + ruolo Boardy |
 | `/help` | Lista comandi |
+| `/regolamento <gioco>` | *(solo owner)* Avvia la lettura di un regolamento dalle FOTO: dopo il comando mandi le foto delle pagine, poi `/fine`. In alternativa mandi le foto con didascalia «regolamento di \<gioco\>». Formati: JPG, PNG, WebP. Boardy le legge (OCR Gemini) e avvisa se qualche pagina è poco chiara o se ne manca qualcuna. Vedi `../docs/LEARNINGS.md` 2026-06-23. |
+| `/fine` | Chiude la sessione di scansione regolamento aperta con `/regolamento` |
+| una o più foto | *(solo owner)* Come sopra: lette come pagine di un regolamento |
 | qualsiasi testo | Domanda a Boardy |
 
 ---
@@ -93,7 +96,8 @@ Cose da sapere:
 - L'image è la stessa di boardy (riusa layer cache, ~0 sec extra di build).
 - Il container `boardy-telegram` legge `.env` dalla root del repo (stesso file di boardy).
 - `BOARDY_BASE_URL` è sovrascritto a `http://boardy:8765` (DNS interno docker), non serve esporre la porta su internet.
-- Lo stato (`telegram_chats.json`) vive nel named volume `boardy_db` insieme al DB. Sopravvive a restart e rebuild.
+- Lo stato (`telegram_chats.json`) vive in `/data` insieme al DB. Sopravvive a restart e rebuild. Formato nuovo: `chat_id → {role, conversation_id}`; il testo vero sta in `conversations`.
+- Il container `telegram-bot` disabilita l'healthcheck HTTP ereditato dall'immagine: il bot non espone `127.0.0.1:8765`, fa polling Telegram. Se lo vedi `unhealthy`, controlla che il compose abbia `healthcheck: disable: true` e ricrea il servizio.
 
 **Update workflow** del bot (identico a boardy):
 ```bash
@@ -107,9 +111,9 @@ docker compose -f deploy/docker-compose.yml restart telegram-bot
 
 | Cosa | Dove | Sopravvive a restart? |
 |---|---|---|
-| Conv attiva per chat owner | `<BOARDY_DB dir>/telegram_chats.json` (mapping `chat_id → conv_id`) + tabella `conversations` lato Boardy | **Sì** |
+| Conv attiva per chat owner/guest | `<BOARDY_DB dir>/telegram_chats.json` (mapping `chat_id → {role, conversation_id}`) + tabella `conversations` lato Boardy | **Sì** |
 | Storia messaggi owner | Tabella `conversations` lato Boardy (saved a ogni turno) | **Sì** |
-| Storia messaggi guest | Memoria del processo bot | **No** (by design, specchia sessionStorage del web) |
+| Storia messaggi guest Telegram | Tabella `conversations` lato Boardy, read-only tools, metadata Telegram | **Sì** |
 | Allow-list owner | `.env` (`TELEGRAM_OWNER_IDS`) | **Sì** |
 | Cookie sessione del bot | In memoria + lo rifa se serve | N/A (re-login automatico) |
 
@@ -124,6 +128,7 @@ docker compose -f deploy/docker-compose.yml restart telegram-bot
 | Owner riceve "ruolo: owner" ma write fallisce | `BOARDY_BOT_USERNAME`/`PASSWORD` mancanti o sbagliati → bot fa fallback a guest mode | Verifica login con `curl -d '{"username":"…","password":"…"}' -H 'content-type: application/json' http://127.0.0.1:8765/auth/login` |
 | `HTTP 401 da /chat` ricorrente | Cookie scaduto + relogin fallisce | Controlla che l'account esista (`uv run python etl/create_user.py list`); ruota password se serve |
 | Bot non risponde, niente log | Polling bloccato / token revocato | `docker compose logs telegram-bot` → se vedi 401 da Telegram, regenera il token da BotFather |
+| `boardy-telegram` risulta `unhealthy` ma risponde | Healthcheck HTTP ereditato dall'immagine web, ma il bot non espone HTTP | Aggiungi/verifica `healthcheck: disable: true` sotto `telegram-bot`, poi `docker compose -f deploy/docker-compose.yml --profile telegram up -d --no-build telegram-bot` |
 | Risposta troncata | Telegram limita a 4096 char per messaggio | Il bot già spezza in chunk; se vedi una risposta SINGOLA troncata è un bug, segnalalo |
 | Markdown rotto (vedi `**`, `*` letterali) | Il fallback a plain text è scattato (asterischi non bilanciati) | Cosmetico, ignora. Se ricorrente, rivedi il prompt di Boardy |
 | `state file illeggibile` | JSON corrotto su disco | `rm data/telegram_chats.json` (perdi solo il mapping chat→conv, riparti puliti) |

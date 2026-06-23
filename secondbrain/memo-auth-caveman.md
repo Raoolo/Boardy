@@ -22,7 +22,8 @@ Boardy è un **palazzo aperto al pubblico al piano terra, con appartamenti priva
 Apre `https://boardy.tuodominio.tld`. Il portiere lo guarda, vede che non ha braccialetto, gli mette uno sticker "Guest" sul petto.
 - Può navigare libreria/buste/wishlist → tutto in sola lettura.
 - Può chiacchierare col bot → ma il bot lo riconosce come Guest e **non tira fuori gli attrezzi che modificano l'inventario** (il filtro `WRITE_TOOLS` in `app/chat.py` li nasconde proprio dalla cassetta degli attrezzi prima di iniziare).
-- Le sue chiacchiere col bot vivono **solo nel suo browser** (sessionStorage) — chiude la tab, sparito tutto. Niente da cancellare dal DB, niente GDPR da osservare.
+- Le sue chiacchiere col bot web vivono **solo nel suo browser** (sessionStorage) — chiude la tab, sparito tutto. Niente da cancellare dal DB, niente GDPR da osservare per il guest web.
+- Eccezione importante: se il guest parla via **Telegram**, la chat viene salvata nel DB con il suo `telegram user_id`/username. Questo serve a non perdere il contesto al restart del bot, ma apre il tema GDPR/privacy policy.
 
 ### Scenario 2 — Tu (raulo) fai login
 Vai su `/login`, inserisci username + password. Il portiere prende l'impronta della password che hai digitato, la confronta con quella in cassaforte. Se combacia:
@@ -31,8 +32,9 @@ Vai su `/login`, inserisci username + password. Il portiere prende l'impronta de
 - Il bot ora ti riconosce come `raulo`: ha **tutti** gli attrezzi disponibili.
 
 ### Scenario 3 — Vitto e Leo entrano con la loro chiave
-Stessa cosa: ognuno ha la sua chiave, ognuno riceve il suo braccialetto. **Ma tutti e tre vedete la stessa collezione** — è il palazzo, non l'appartamento personale. Differenza pratica: se vitto aggiunge "Wingspan", lo vedete anche tu e leo.
+Stessa cosa: ognuno ha la sua chiave, ognuno riceve il suo braccialetto. **Tutti e tre vedete la stessa collezione** — è il palazzo, non l'appartamento personale. Differenza pratica: se vitto aggiunge "Wingspan", lo vedete anche tu e leo.
 - L'audit log (`changes` table) traccia chi ha fatto cosa: `source = "chat:42/user:vitto"`. Se domani trovi un gioco "strano" puoi risalire a chi l'ha messo.
+- La sidebar chat invece è personale: di default ognuno vede solo le proprie conversazioni (`Mie`). La vista `Audit` mostra tutte le chat, ma solo a ruoli owner/admin ed è pensata per controllo, non per continuare la conversazione di altri.
 
 ### Scenario 4 — Qualcuno ruba il braccialetto a vitto
 Bevuta strana al bar, screenshot del cookie, comunque. Il ladro ora può fingersi vitto fino alla scadenza (30 giorni). **Non c'è modo di revocare quel singolo braccialetto** perché il portiere non tiene una lista (cookie stateless). Soluzione: ruoti `BOARDY_SESSION_SECRET` → il portiere cambia firma → **tutti** i braccialetti diventano invalidi e tutti devono rifare login. Per 3 utenti è una scocciatura accettabile.

@@ -18,7 +18,7 @@ from . import games_semantic as gs
 from . import schema
 from . import rulebooks as rb
 from . import tools as tools_mod
-from .auth import get_current_user, require_owner
+from .auth import can_audit_conversations, get_current_user, require_owner
 from .chat import chat
 from .db import get_conn
 
@@ -49,8 +49,18 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: int | None = None
     # Guest path: client invia l'intero history ogni turno (vive in sessionStorage).
-    # Ignorato se conversation_id e' impostato (owner: history caricato dal DB).
+    # Ignorato se conversation_id e' impostato (owner o guest persistito:
+    # history caricato dal DB).
     history: list[dict] | None = None
+    # Telegram bot only: persist guest chats server-side instead of keeping
+    # history in bot RAM. Web guests stay ephemeral by default.
+    persist_guest: bool = False
+    guest_origin: str | None = None
+    guest_actor_id: str | None = None
+    guest_actor_name: str | None = None
+    client_origin: str | None = None
+    client_actor_id: str | None = None
+    client_actor_name: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -100,7 +110,12 @@ def auth_me(user: dict | None = Depends(get_current_user)) -> dict:
     mostrare 'Guest · Accedi' o 'username · Esci'."""
     if user is None:
         return {"authenticated": False}
-    return {"authenticated": True, "username": user["username"], "role": user["role"]}
+    return {
+        "authenticated": True,
+        "username": user["username"],
+        "role": user["role"],
+        "can_audit_conversations": can_audit_conversations(user),
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -109,10 +124,34 @@ def chat_endpoint(
     user: dict | None = Depends(get_current_user),
 ) -> ChatResponse:
     if user is None:
-        # Guest: chat ephemera lato client. NON creiamo conversation_id,
-        # NON salviamo nulla. Il client invia l'intero history a ogni turno
-        # (vive in sessionStorage del browser, sparisce al refresh).
-        # Tool gating: chat() filtra fuori i write tools quando user=None.
+        # Guest web di default: chat ephemera lato client. Il bot Telegram puo'
+        # optare per una conversazione persistita passando persist_guest=true.
+        # Tool gating: chat() filtra fuori i write tools quando user=None in
+        # entrambi i casi.
+        if req.persist_guest:
+            conv_id = req.conversation_id
+            if conv_id is None:
+                conv_id = conv.create_conversation(
+                    origin=(req.guest_origin or "telegram"),
+                    actor_role="guest",
+                    actor_id=req.guest_actor_id,
+                    actor_name=req.guest_actor_name,
+                )
+                history = []
+            else:
+                loaded = conv.get_conversation(conv_id)
+                if (
+                    loaded is None
+                    or loaded.get("actor_role") != "guest"
+                    or loaded.get("origin") != (req.guest_origin or "telegram")
+                ):
+                    raise HTTPException(404, f"conversation {conv_id} not found")
+                history = loaded["history"]
+
+            reply, history = chat(req.message, history, conversation_id=conv_id, user=None)
+            conv.save_conversation(conv_id, history)
+            return ChatResponse(reply=reply, history=history, conversation_id=conv_id)
+
         history = req.history or []
         reply, history = chat(req.message, history, conversation_id=None, user=None)
         return ChatResponse(reply=reply, history=history, conversation_id=0)
@@ -120,12 +159,19 @@ def chat_endpoint(
     # Owner: chat condivisa tra owner, persistita in `conversations`.
     conv_id = req.conversation_id
     if conv_id is None:
-        conv_id = conv.create_conversation()
+        conv_id = conv.create_conversation(
+            origin=req.client_origin or "web",
+            actor_role="owner",
+            actor_id=req.client_actor_id or (str(user.get("id")) if user.get("id") is not None else None),
+            actor_name=req.client_actor_name or user.get("username"),
+        )
         history = []
     else:
         loaded = conv.get_conversation(conv_id)
         if loaded is None:
             raise HTTPException(404, f"conversation {conv_id} not found")
+        if not conv.is_owned_by_user(loaded, user):
+            raise HTTPException(403, "cannot continue another user's conversation")
         history = loaded["history"]
 
     reply, history = chat(req.message, history, conversation_id=conv_id, user=user)
@@ -133,11 +179,19 @@ def chat_endpoint(
     return ChatResponse(reply=reply, history=history, conversation_id=conv_id)
 
 
-# Conversations sidebar: solo owner. Guest non ha sidebar (chat ephemera client-side).
+# Conversations sidebar: autenticati vedono le proprie chat. Owner/admin possono
+# passare `scope=audit` per vedere tutte le conversazioni in una vista separata.
 @app.get("/conversations")
-def list_conversations(user: dict | None = Depends(get_current_user)) -> list[dict]:
+def list_conversations(
+    scope: str = "mine",
+    user: dict | None = Depends(get_current_user),
+) -> list[dict]:
     require_owner(user)
-    return conv.list_conversations()
+    if scope == "audit":
+        if not can_audit_conversations(user):
+            raise HTTPException(403, "audit scope not allowed")
+        return conv.list_conversations(scope="audit")
+    return conv.list_conversations(user=user, scope="mine")
 
 
 @app.get("/conversations/{conv_id}")
@@ -146,12 +200,19 @@ def get_conversation(conv_id: int, user: dict | None = Depends(get_current_user)
     c = conv.get_conversation(conv_id)
     if c is None:
         raise HTTPException(404, f"conversation {conv_id} not found")
+    if not conv.is_owned_by_user(c, user) and not can_audit_conversations(user):
+        raise HTTPException(404, f"conversation {conv_id} not found")
     return c
 
 
 @app.delete("/conversations/{conv_id}")
 def delete_conversation(conv_id: int, user: dict | None = Depends(get_current_user)) -> dict:
     require_owner(user)
+    c = conv.get_conversation(conv_id)
+    if c is None:
+        raise HTTPException(404, f"conversation {conv_id} not found")
+    if not conv.is_owned_by_user(c, user) and not can_audit_conversations(user):
+        raise HTTPException(404, f"conversation {conv_id} not found")
     conv.delete_conversation(conv_id)
     return {"ok": True}
 
@@ -733,6 +794,53 @@ async def upload_rulebook(
     # PDF bytes are stored in the DB (boardy.db is the single source of truth) —
     # we keep the original filename only as the dedup `source` handle.
     result = rb.ingest_bytes(game_name, contents, source=safe)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return result
+
+
+# Photos of a physical rulebook → vision OCR → indexed like any rulebook.
+# DeepSeek can't read images, so the OCR step uses Gemini (see app/ocr.py); the
+# rest of the pipeline is identical to PDF ingest. Owner-only (it writes to the DB).
+# Supported formats: JPG/JPEG, PNG, WebP (what Gemini + Pillow handle reliably).
+_PHOTO_MIME_ALLOWED = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
+_PHOTO_EXT_ALLOWED = (".jpg", ".jpeg", ".png", ".webp")
+_PHOTO_FORMATS_HELP = "Formati supportati: JPG, PNG, WebP."
+_MAX_PHOTOS = 40
+_MAX_PHOTO_BYTES = 15 * 1024 * 1024  # 15 MB per photo
+
+
+def _is_supported_photo(f: UploadFile) -> bool:
+    """Accetta solo JPG/PNG/WebP. Usa il MIME se presente, altrimenti l'estensione."""
+    if f.content_type:
+        return f.content_type.lower() in _PHOTO_MIME_ALLOWED
+    name = (f.filename or "").lower()
+    return name.endswith(_PHOTO_EXT_ALLOWED)
+
+
+@app.post("/rulebooks/upload-photos")
+async def upload_rulebook_photos(
+    game_name: str = Form(...),
+    files: list[UploadFile] = File(...),
+    user: dict | None = Depends(get_current_user),
+) -> dict:
+    require_owner(user)
+    if not files:
+        raise HTTPException(400, "nessuna foto ricevuta")
+    if len(files) > _MAX_PHOTOS:
+        raise HTTPException(400, f"troppe foto (max {_MAX_PHOTOS})")
+    images: list[bytes] = []
+    for f in files:
+        if not _is_supported_photo(f):
+            raise HTTPException(400, f"{f.filename or 'file'}: formato non supportato. {_PHOTO_FORMATS_HELP}")
+        data = await f.read()
+        if len(data) > _MAX_PHOTO_BYTES:
+            raise HTTPException(400, f"{f.filename or 'foto'}: troppo grande (max 15 MB)")
+        if data:
+            images.append(data)
+    if not images:
+        raise HTTPException(400, "le foto sono vuote")
+    result = tools_mod.ingest_rulebook_photos(game_name, images)
     if "error" in result:
         raise HTTPException(400, result["error"])
     return result
