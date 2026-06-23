@@ -120,6 +120,13 @@ secondbrain/ Owner's Obsidian vault; memos about Boardy live in `memo-*.md`. DO 
 
 ## Deploy / Self-host (Docker)
 
+> ⚠️ **DOVE GIRA LA PRODUZIONE — leggere prima di toccare DB o codice.** Non esiste un server remoto separato: **la produzione gira su `surfacesrvr` (questa stessa macchina)** come progetto Docker Compose `boardy` (servizi `boardy` + `telegram-bot`). Conseguenze, tutte verificate (inode condiviso, `docker inspect`):
+> - **DB unico e condiviso.** Il container monta `data/` → `/data` con `BOARDY_DB=/data/boardy.db`: il file `data/boardy.db` del repo **È** il DB di produzione (stesso inode). **Editare il "DB locale" = editare la produzione live.** Non c'è un "DB del server" da raggiungere a parte: è questo.
+> - **Codice = working tree in checkout.** `app/ etl/ web/ bot/` sono bind-montati: la produzione serve **i file attualmente in checkout**, non un commit fisso. `git checkout <altro-branch>` cambia il codice di produzione al prossimo restart. Tieni `main` in checkout per la prod.
+> - **Restart vs Rebuild.** Modifiche a `.py`/HTML → `docker compose ... restart` (il bind-mount le porta dentro; serve restart perché niente auto-reload). Modifiche a `pyproject.toml`/`uv.lock` (dipendenze nuove, es. py3langid) → **`up -d --build`**: un semplice `restart` farebbe crashare l'app con `ModuleNotFoundError`.
+> - **I dati stanno FUORI dall'immagine, ed è giusto così.** L'immagine = codice + deps + modello e5 (immutabile, ricostruibile). DB/`telegram_chats.json`/PDF = stato mutabile bind-montato: se fossero nell'immagine, ogni rebuild li cancellerebbe. Il container è usa-e-getta, i dati persistono.
+> - **Niente ambiente di test separato.** "Dev" e "prod" sono sovrapposti: i tuoi smoke-test locali toccano i dati veri degli amici. Vedi il TODO "Dev-local ↔ deploy-server convergence".
+
 Docker files live in `deploy/`. The compose file pins `name: boardy` so the project name is stable regardless of where you invoke from. Profiles sono additivi:
 
 ```bash
