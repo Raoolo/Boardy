@@ -135,3 +135,8 @@ def require_owner(user: dict | None) -> dict:
     if user is None:
         raise HTTPException(401, "login required")
     return user
+
+
+def can_audit_conversations(user: dict | None) -> bool:
+    """True per ruoli che possono aprire la vista audit di tutte le chat."""
+    return bool(user and user.get("role") in {"owner", "admin"})

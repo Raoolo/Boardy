@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS conversations (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   title TEXT,
+  origin TEXT NOT NULL DEFAULT 'web',
+  actor_role TEXT NOT NULL DEFAULT 'owner',
+  actor_id TEXT,
+  actor_name TEXT,
   history_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at DESC);
@@ -30,6 +34,15 @@ def _now() -> str:
 def migrate() -> None:
     with get_conn() as c:
         c.executescript(MIGRATION)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "origin" not in cols:
+            c.execute("ALTER TABLE conversations ADD COLUMN origin TEXT NOT NULL DEFAULT 'web'")
+        if "actor_role" not in cols:
+            c.execute("ALTER TABLE conversations ADD COLUMN actor_role TEXT NOT NULL DEFAULT 'owner'")
+        if "actor_id" not in cols:
+            c.execute("ALTER TABLE conversations ADD COLUMN actor_id TEXT")
+        if "actor_name" not in cols:
+            c.execute("ALTER TABLE conversations ADD COLUMN actor_name TEXT")
         c.commit()
 
 
@@ -133,18 +146,45 @@ def _title_from_history(history: list[dict]) -> str | None:
     return (text[:60] + "…") if len(text) > 60 else text
 
 
-def list_conversations() -> list[dict]:
+def _owned_by_user_where(user: dict) -> tuple[str, tuple]:
+    """SQL predicate for conversations owned by an authenticated Boardy user.
+
+    `actor_id` is not enough because Telegram owner chats use the Telegram
+    user_id, while web chats use the Boardy DB user id. `actor_name` bridges
+    both worlds when the same human has a Boardy username.
+    """
+    uid = str(user.get("id")) if user.get("id") is not None else ""
+    username = (user.get("username") or "").lower()
+    return (
+        """actor_role='owner' AND (
+             actor_id=?
+             OR lower(COALESCE(actor_name, ''))=?
+           )""",
+        (uid, username),
+    )
+
+
+def list_conversations(*, user: dict | None = None, scope: str = "mine") -> list[dict]:
     with get_conn() as c:
-        rows = c.execute(
-            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT 100"
-        ).fetchall()
+        base = """SELECT id, title, created_at, updated_at,
+                         origin, actor_role, actor_id, actor_name
+                  FROM conversations"""
+        params: tuple = ()
+        if scope != "audit":
+            if user is None:
+                return []
+            where, params = _owned_by_user_where(user)
+            base += f" WHERE {where}"
+        rows = c.execute(base + " ORDER BY updated_at DESC LIMIT 100", params).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_conversation(conv_id: int) -> dict | None:
     with get_conn() as c:
         row = c.execute(
-            "SELECT id, title, created_at, updated_at, history_json FROM conversations WHERE id=?",
+            """SELECT id, title, created_at, updated_at,
+                      origin, actor_role, actor_id, actor_name, history_json
+               FROM conversations WHERE id=?""",
             (conv_id,),
         ).fetchone()
     if not row:
@@ -154,12 +194,42 @@ def get_conversation(conv_id: int) -> dict | None:
     return d
 
 
-def create_conversation() -> int:
+def is_owned_by_user(conversation: dict, user: dict) -> bool:
+    if conversation.get("actor_role") != "owner":
+        return False
+    uid = str(user.get("id")) if user.get("id") is not None else ""
+    username = (user.get("username") or "").lower()
+    actor_id = str(conversation.get("actor_id") or "")
+    actor_name = str(conversation.get("actor_name") or "").lower()
+    if (uid and actor_id == uid) or (username and actor_name == username):
+        return True
+    # Telegram owner chats are stored with the *Telegram* identity (user_id +
+    # display name) for audit, but the bot always authenticates as the shared
+    # service account BOARDY_BOT_USERNAME — so neither id nor name ever matches
+    # the cookie user, and a plain ownership check 403s every continuation.
+    # The bot already gates which conversation a chat_id may continue via its own
+    # per-chat state file, and only owner/admin roles reach this branch, so we
+    # trust any owner/admin to continue a telegram-origin owner conversation.
+    if (conversation.get("origin") == "telegram"
+            and user.get("role") in {"owner", "admin"}):
+        return True
+    return False
+
+
+def create_conversation(
+    *,
+    origin: str = "web",
+    actor_role: str = "owner",
+    actor_id: str | None = None,
+    actor_name: str | None = None,
+) -> int:
     now = _now()
     with get_conn() as c:
         cur = c.execute(
-            "INSERT INTO conversations(created_at, updated_at, history_json) VALUES(?, ?, '[]')",
-            (now, now),
+            """INSERT INTO conversations(
+                   created_at, updated_at, origin, actor_role, actor_id, actor_name, history_json
+               ) VALUES(?, ?, ?, ?, ?, ?, '[]')""",
+            (now, now, origin, actor_role, actor_id, actor_name),
         )
         c.commit()
     return cur.lastrowid
