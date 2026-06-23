@@ -572,6 +572,17 @@ def chat(user_message: str, history: list[dict] | None = None,
             func = TOOL_FUNCS.get(b.name)
             if func is None:
                 result: Any = {"error": f"unknown tool {b.name}"}
+            elif user is None and b.name in WRITE_TOOLS:
+                # Difesa in profondità: un guest non deve MAI eseguire un write
+                # tool, anche se è trapelato nel registry offerto (voce dimenticata
+                # in WRITE_TOOLS, codice stale, o il modello che chiama un nome di
+                # tool esistente che non gli è stato proposto). Nascondere i write
+                # tool in `_filter_tools_for_user` è la prima linea; QUESTA è la
+                # barriera dura. Regressione reale: un guest era riuscito a far
+                # scaricare/indicizzare un regolamento (download_rulebook).
+                _log(f"conv={conv}   BLOCKED guest write attempt: {b.name}")
+                result = {"error": "permission denied: questa azione richiede "
+                                   "l'accesso owner; un ospite può solo leggere."}
             else:
                 # Strip any underscore-prefixed kwargs the model may have
                 # synthesized, then inject our `_source` so the audit log
