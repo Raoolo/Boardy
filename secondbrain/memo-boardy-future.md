@@ -39,7 +39,11 @@ solo `web/*.html`.
 
 - 🔴 **"Powered by BGG" logo** — compliance dei termini d'uso BGG XML
   API. Da fare prima di esporre Boardy fuori da localhost.
-- 🟡 Voice input, OCR fallback, chunking tabellare (immutati).
+- 🟡 Voice input, chunking tabellare (immutati). **OCR: FATTO** il 2026-06-23 ma
+  in forma diversa dall'idea originale: non `pytesseract` sui PDF scansionati, ma
+  **OCR delle FOTO** dei regolamenti via visione Gemini (DeepSeek non vede immagini).
+  Web (tasto 📷) + Telegram. Resta nice-to-have riusare `app/ocr.py` come fallback
+  automatico sui PDF scansionati. Vedi `../docs/LEARNINGS.md` 2026-06-23.
 - 🟢 Cinque nuovi item "spice" aggiunti il 2026-05-06: empty-state chat
   con prompt suggeriti, riassunto LLM del titolo conversazione,
   keyboard shortcuts, sidebar conv-search, easter egg `/dado` o

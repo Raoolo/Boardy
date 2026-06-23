@@ -22,6 +22,8 @@ etl/.bgg_files_cache/
 etl/.bgg_cards_cache/
 # Docker runtime cache (BOARDY_CACHE_DIR points here in the container)
 data/.cache/
+# Telegram bot runtime state (chat_id → conv mapping, contains real user_ids)
+data/telegram_chats.json
 # Stray runtime logs from manual `uvicorn` runs
 boardy_run.log
 
