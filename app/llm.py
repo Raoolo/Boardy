@@ -30,6 +30,21 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 
+def _default_temperature() -> float:
+    """Sampling temperature for the agentic chat loop.
+
+    Defaults to 0: this is a tool-routing assistant, not a creative writer, and
+    the deterministic sub-tasks (tags, OCR, titles, library filter) already run
+    at 0. Before this, the chat loop inherited the provider default (DeepSeek &
+    Anthropic = 1.0), which hurt tool-choice and format consistency. Override
+    per-deployment with LLM_TEMPERATURE.
+    """
+    try:
+        return float(os.environ.get("LLM_TEMPERATURE", "0"))
+    except ValueError:
+        return 0.0
+
+
 # ----- Normalized content blocks (vendor-neutral, modeled after Anthropic) -----
 
 @dataclass
@@ -44,6 +59,10 @@ class ToolUseBlock:
     id: str
     name: str
     input: dict
+    # Set when the provider could not parse the model's tool-call arguments
+    # (e.g. invalid JSON from an OpenAI-compatible model). The chat loop returns
+    # this as the tool_result instead of executing the tool with empty input.
+    error: str | None = None
     type: str = "tool_use"
 
 
@@ -95,11 +114,16 @@ class AnthropicProvider(Provider):
         self._client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         self.model = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
         self.max_tokens = max_tokens
+        self.temperature = _default_temperature()
 
     def run_turn(self, history, system_prompt, tools):
         resp = self._client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
+            # Tool-routing assistant → low temperature for stable tool choice and
+            # output format. Was the provider default (Anthropic 1.0) before; now
+            # explicit and tunable via LLM_TEMPERATURE.
+            temperature=self.temperature,
             # cache_control on the system prompt: Anthropic-only optimization,
             # no-ops elsewhere. Saves ~75% on input tokens for repeated turns.
             system=[{"type": "text", "text": system_prompt,
@@ -163,6 +187,7 @@ class OllamaProvider(Provider):
         # compat endpoint silently drops `options` from extra_body, so
         # baking config into a Modelfile is the only reliable path.
         self.model = model or os.environ.get("LLM_MODEL", "boardy-qwen")
+        self.temperature = _default_temperature()
 
     def run_turn(self, history, system_prompt, tools):
         oa_tools = [self._tool_anthropic_to_openai(t) for t in tools]
@@ -173,17 +198,26 @@ class OllamaProvider(Provider):
             messages=oa_messages,
             tools=oa_tools,
             tool_choice="auto",
+            # Explicit low temperature for stable tool routing (was the provider
+            # default — DeepSeek 1.0). Tunable via LLM_TEMPERATURE.
+            temperature=self.temperature,
         )
         msg = resp.choices[0].message
         blocks: list[TextBlock | ToolUseBlock] = []
         if msg.content:
             blocks.append(TextBlock(text=msg.content))
         for tc in (msg.tool_calls or []):
+            err: str | None = None
             try:
                 args = json.loads(tc.function.arguments) if tc.function.arguments else {}
             except json.JSONDecodeError:
+                # Don't silently call the tool with {} — that runs the wrong
+                # action on empty input. Flag it so the chat loop returns an
+                # error to the model, which can then retry the call.
                 args = {}
-            blocks.append(ToolUseBlock(id=tc.id, name=tc.function.name, input=args))
+                err = (f"malformed tool arguments (invalid JSON) for {tc.function.name!r}: "
+                       f"{(tc.function.arguments or '')[:200]!r}")
+            blocks.append(ToolUseBlock(id=tc.id, name=tc.function.name, input=args, error=err))
         stop_reason = "tool_use" if msg.tool_calls else "end_turn"
         # Store the OpenAI-shaped assistant message verbatim in history so
         # the next OpenAI call gets a consistent transcript.
