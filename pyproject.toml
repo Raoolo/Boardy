@@ -37,6 +37,9 @@ dependencies = [
     "google-genai>=1.0.0",
     "pillow>=11.0.0",
     "py3langid>=0.3.0",
+    # Rasterizza i PDF scansionati (senza layer di testo) in immagini, per darle
+    # in pasto all'OCR Gemini. Wheel pure (niente poppler di sistema), arm64 ok.
+    "pymupdf>=1.24.0",
 ]
 
 [tool.uv]

@@ -1029,57 +1029,86 @@ def find_rulebook(game_name: str, bgg_id: int | None = None) -> dict:
     for the model to propose to the user. Broad Tavily .pdf search only if both
     sources are empty. Each candidate has `source` + `lang`.
     """
-    candidates: list[dict] = []
+    from . import rulebooks
 
-    # 1j1ju.com deterministic HTML search (direct PDF links)
+    # 1j1ju.com deterministic HTML search (direct PDF links) — RELEVANCE-FILTERED.
+    # 1j1ju returns fuzzy junk for games it doesn't carry; keeping it would fill
+    # the list and suppress the web fallback below (see _candidate_matches_game).
+    deterministic: list[dict] = []
     try:
         from etl import onejour_api
-        for h in onejour_api.search_rulebooks(game_name, limit=6):
-            candidates.append({"title": h["title"], "url": h["url"],
-                               "source": "1j1ju.com", "lang": h["lang"]})
+        for h in onejour_api.search_rulebooks(game_name, limit=8):
+            if _candidate_matches_game(h["title"], game_name):
+                deterministic.append({"title": h["title"], "url": h["url"],
+                                      "source": "1j1ju.com", "lang": h["lang"]})
     except Exception:
         pass
 
-    # BGG Files (needs bgg_id) — fileid-based, downloaded via browser
+    # BGG Files (needs bgg_id) — already game-bound (queried by objectid).
     if bgg_id:
-        candidates += _bgg_candidates(bgg_id)
+        deterministic += _bgg_candidates(bgg_id)
 
-    if candidates:
-        return {"game": game_name, "count": len(candidates), "candidates": candidates}
+    # A candidate is "usable" only if its language is one the model can answer
+    # from. BGG often returns ONLY a foreign-language file (e.g. Intarsia → an
+    # unofficial Japanese rulebook): that's the right GAME but unusable, and it
+    # must NOT suppress the web search. Unknown lang ('?') gets benefit of doubt.
+    allowed = {a.upper() for a in rulebooks.allowed_rulebook_langs()}
 
-    # fallback: broad Tavily web search for direct .pdf links
+    def _lang_usable(c: dict) -> bool:
+        l = (c.get("lang") or "").strip().upper()
+        if l in ("", "?"):
+            return True
+        return any(l.startswith(a) for a in allowed)
+
+    has_usable = any(_lang_usable(c) for c in deterministic)
+
+    # Broad web search (Tavily) for direct .pdf links — runs whenever no
+    # deterministic source gave a usable candidate (empty list OR only junk/
+    # foreign-language hits). This is what finds e.g. "intarsia rulebook" on
+    # Google when 1j1ju/BGG come up short. Results are MERGED, not replaced.
+    web: list[dict] = []
     api_key = os.environ.get("TAVILY_API_KEY")
-    if not api_key:
-        return {"error": "No candidates from 1j1ju / BGG and TAVILY_API_KEY not set. "
-                         "Provide a direct PDF URL or local path instead."}
-    try:
-        from tavily import TavilyClient
-    except ImportError:
-        return {"error": "tavily-python not installed. Run `uv sync`."}
+    if not has_usable and api_key:
+        try:
+            from tavily import TavilyClient
+            from etl import onejour_api  # reuse the lang heuristic
+            resp = TavilyClient(api_key=api_key).search(
+                query=f"{game_name} rulebook pdf",
+                max_results=10, search_depth="basic",
+                include_answer=False, include_raw_content=False,
+            )
+            for r in resp.get("results", []):
+                url = r.get("url") or ""
+                if not url.lower().endswith(".pdf"):
+                    continue
+                web.append({
+                    "title": r.get("title"),
+                    "url": url,
+                    "source": (url.split("/")[2] if "://" in url else "web"),
+                    "lang": onejour_api.guess_lang(url),
+                })
+        except Exception:
+            pass
 
-    try:
-        resp = TavilyClient(api_key=api_key).search(
-            query=f"{game_name} rulebook pdf",
-            max_results=10, search_depth="basic",
-            include_answer=False, include_raw_content=False,
-        )
-    except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}"}
-
-    from etl import onejour_api  # reuse the same lang heuristic
-    candidates = []
-    for r in resp.get("results", []):
-        url = r.get("url") or ""
-        if not url.lower().endswith(".pdf"):
+    # Merge deterministic + web, dedupe by URL, preserve order.
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    for c in deterministic + web:
+        u = c.get("url")
+        if u and u in seen:
             continue
-        candidates.append({
-            "title": r.get("title"),
-            "url": url,
-            "source": url.split("/")[2] if "://" in url else None,
-            "lang": onejour_api.guess_lang(url),
-        })
-    return {"game": game_name, "count": len(candidates),
-            "candidates": candidates[:8], "source": "web"}
+        if u:
+            seen.add(u)
+        candidates.append(c)
+
+    if not candidates:
+        msg = ("No usable candidates from 1j1ju / BGG. "
+               + ("Provide a direct PDF URL or local path instead."
+                  if api_key else
+                  "TAVILY_API_KEY not set, so the web fallback is disabled — "
+                  "provide a direct PDF URL or local path instead."))
+        return {"error": msg}
+    return {"game": game_name, "count": len(candidates), "candidates": candidates}
 
 
 def _fetch_pdf_bytes(url: str, *, max_bytes: int = 30 * 1024 * 1024) -> dict:
@@ -1145,7 +1174,8 @@ def download_rulebook(game_name: str, url: str | None = None,
     see `warnings` in the result.
 
     One confirmed action = download + ingest. PDF bytes go into the DB. Game must
-    exist. Use `ingest_rulebook` for a local file.
+    exist. Use `ingest_rulebook` for a local file. A SCANNED PDF (no text layer)
+    is auto-OCR'd via Gemini vision (see `warnings` — page citations get fuzzier).
     """
     from . import rulebooks
     canonical, game_bgg_id = _resolve_game_bgg_id(game_name)
@@ -1171,7 +1201,8 @@ def download_rulebook(game_name: str, url: str | None = None,
             return {"error": r["error"], "bgg_filepageid": bgg_filepageid}
         result = rulebooks.ingest_bytes(game_name, r["data"],
                                         source=f"bgg:filepage/{bgg_filepageid}",
-                                        enforce_lang=False, actor=_source)
+                                        enforce_lang=False, actor=_source,
+                                        ocr_fallback=True)
         result["bgg_filepageid"] = bgg_filepageid
         return result
 
@@ -1184,7 +1215,8 @@ def download_rulebook(game_name: str, url: str | None = None,
     # name check warns if the PDF text doesn't mention the game (wrong-game guard).
     # source=url → re-download replaces the row via UNIQUE(game_id, source_path)
     result = rulebooks.ingest_bytes(game_name, dl["data"], source=url,
-                                    enforce_lang=False, actor=_source)
+                                    enforce_lang=False, actor=_source,
+                                    ocr_fallback=True)
     result["url"] = url
     return result
 
@@ -1204,6 +1236,25 @@ def _rulebook_core(title: str) -> str:
     toks = [t for t in re.sub(r"[^a-z0-9]+", " ", title.lower()).split()
             if t not in _RULEBOOK_WORDS]
     return " ".join(toks)
+
+
+def _candidate_matches_game(title: str, game_name: str) -> bool:
+    """True if a search-result title plausibly belongs to `game_name`.
+
+    1j1ju returns fuzzy junk for games it doesn't have (Intarsia → Ticket to
+    Ride / Azul / Star Wars…). Without this filter that junk fills the candidate
+    list and SUPPRESSES the Tavily web fallback (which only fired on an empty
+    list) — so the bot would surface garbage and never reach the web search that
+    actually finds the PDF. Heuristic: every token of the (normalized) game name
+    must appear in the candidate's core title (rulebook-words stripped). Keeps
+    expansions ("Barrage: The Leeghwater Project" ⊇ "barrage") and drops junk.
+    """
+    from . import rulebooks
+    game_toks = set(rulebooks._norm_name(game_name).split())
+    if not game_toks:
+        return True
+    core_toks = set(_rulebook_core(title).split())
+    return game_toks <= core_toks
 
 
 def _backfill_rulebook(game_id: int) -> dict:

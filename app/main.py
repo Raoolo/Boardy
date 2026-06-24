@@ -793,7 +793,11 @@ async def upload_rulebook(
     contents = await file.read()
     # PDF bytes are stored in the DB (boardy.db is the single source of truth) —
     # we keep the original filename only as the dedup `source` handle.
-    result = rb.ingest_bytes(game_name, contents, source=safe)
+    # ocr_fallback=True: an uploaded scanned PDF is auto-OCR'd (Gemini) instead
+    # of rejected — the owner picked this file explicitly.
+    result = rb.ingest_bytes(game_name, contents, source=safe,
+                             actor=(f"web:rulebooks/user:{user['username']}" if user else "web:rulebooks"),
+                             ocr_fallback=True)
     if "error" in result:
         raise HTTPException(400, result["error"])
     return result

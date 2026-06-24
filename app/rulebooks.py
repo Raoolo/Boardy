@@ -290,8 +290,61 @@ def _store_rulebook(
     return rb_id, len(chunks)
 
 
+def _ocr_pdf_to_pages(data: bytes, game_name: str, *,
+                      max_pages: int = 40, dpi: int = 150
+                      ) -> tuple[list[tuple[int, str]], dict]:
+    """Rasterize a (likely scanned) PDF and OCR each page via Gemini vision.
+
+    Used as the fallback when pypdf finds NO extractable text (the PDF is a scan,
+    just images). Renders each page to a PNG (PyMuPDF, no system deps) and feeds
+    them to `app.ocr.transcribe_images` — the same vision OCR as the photo flow.
+    Returns (pages, report) where pages is [(citation_page, text)]. Lazy-imports
+    fitz + ocr so a text PDF never pays for them. Capped at `max_pages` pages.
+    """
+    import fitz  # PyMuPDF
+
+    from . import ocr
+
+    doc = fitz.open(stream=data, filetype="pdf")
+    n_total = doc.page_count
+    images: list[bytes] = []
+    for i, page in enumerate(doc):
+        if i >= max_pages:
+            break
+        images.append(page.get_pixmap(dpi=dpi).tobytes("png"))
+    doc.close()
+    if not images:
+        return [], {"ocr": True, "error": "no pages to rasterize"}
+
+    pages_ocr = ocr.transcribe_images(images, game_name)
+    pages: list[tuple[int, str]] = []
+    low_quality: list[int] = []
+    running = 0
+    for idx, p in enumerate(pages_ocr, start=1):
+        if p.get("legibility") == "poor":
+            low_quality.append(idx)
+        text = (p.get("text_markdown") or "").strip()
+        if not text:
+            continue
+        n = p.get("page_number_printed")
+        running = n if isinstance(n, int) else running + 1
+        pages.append((running, _clean(text)))
+
+    report = {
+        "ocr": True,
+        "engine": "gemini-vision",
+        "pdf_pages": n_total,
+        "pages_rasterized": len(images),
+        "pages_with_text": len(pages),
+        "low_quality_pages": low_quality,
+        "truncated": n_total > len(images),
+    }
+    return pages, report
+
+
 def ingest_bytes(game_name: str, data: bytes, *, source: str,
-                 enforce_lang: bool = True, actor: str | None = None) -> dict:
+                 enforce_lang: bool = True, actor: str | None = None,
+                 ocr_fallback: bool = False) -> dict:
     """Index a rulebook from raw PDF bytes; stores the PDF itself in the DB.
 
     `source` is a stable handle (file path or origin URL) used for dedup via
@@ -321,12 +374,30 @@ def ingest_bytes(game_name: str, data: bytes, *, source: str,
             return {"error": f"game {game_name!r} not found in DB"}
         game_id, canonical = game["id"], game["name"]
 
+        warnings: list[str] = []
+        ocr_report: str | None = None
+
         pages = _pages_from_reader(reader)
         if not any(t for _, t in pages):
-            return {"error": "no extractable text in PDF (might be a scanned image — "
-                             "carica delle foto del regolamento per l'OCR)"}
-
-        warnings: list[str] = []
+            # Scanned PDF (images, no text layer). With ocr_fallback (user-confirmed
+            # downloads/uploads) rasterize + OCR via Gemini instead of giving up.
+            if not ocr_fallback:
+                return {"error": "no extractable text in PDF (might be a scanned image — "
+                                 "carica delle foto del regolamento per l'OCR)"}
+            import json as _json
+            ocr_pages, rep = _ocr_pdf_to_pages(data, canonical)
+            if not ocr_pages:
+                return {"error": "PDF scansionato e l'OCR non ha estratto testo utile "
+                                 f"({rep.get('error', 'nessun testo')}). "
+                                 "Prova a caricare delle foto più nitide del regolamento."}
+            pages = ocr_pages
+            ocr_report = _json.dumps(rep, ensure_ascii=False)
+            warnings.append("PDF scansionato: il testo è stato ricavato via OCR (Gemini); "
+                            "le citazioni di pagina e i dettagli di tabelle/icone "
+                            "potrebbero essere meno precisi.")
+            if rep.get("truncated"):
+                warnings.append(f"Il PDF ha {rep['pdf_pages']} pagine ma ne ho elaborate "
+                                f"solo {rep['pages_rasterized']} (limite OCR).")
 
         # Language gate (the filename suffix lies — 1j1ju is French — so we sniff
         # the real text). allowed → ok; soft (Latin-EU) → warning; unusable
@@ -357,7 +428,7 @@ def ingest_bytes(game_name: str, data: bytes, *, source: str,
         try:
             rb_id, n_chunks = _store_rulebook(
                 conn, game_id=game_id, source=source, pages=pages, pdf_blob=data,
-                game_label=canonical, actor=actor,
+                ocr_report=ocr_report, game_label=canonical, actor=actor,
             )
         except ValueError:
             return {"error": "PDF parsed but produced 0 chunks"}
@@ -423,7 +494,7 @@ def ingest_pages(
 
 
 def ingest(game_name: str, pdf_path: str, *, enforce_lang: bool = False,
-           actor: str | None = None) -> dict:
+           actor: str | None = None, ocr_fallback: bool = True) -> dict:
     """Parse a local PDF rulebook and index it under the matching game.
 
     Thin wrapper over `ingest_bytes` — reads the file, then stores its bytes in
@@ -437,7 +508,8 @@ def ingest(game_name: str, pdf_path: str, *, enforce_lang: bool = False,
     if not p.suffix.lower() == ".pdf":
         return {"error": "expected a .pdf file"}
     return ingest_bytes(game_name, p.read_bytes(), source=str(p),
-                        enforce_lang=enforce_lang, actor=actor)
+                        enforce_lang=enforce_lang, actor=actor,
+                        ocr_fallback=ocr_fallback)
 
 
 def get_pdf(game_name: str) -> tuple[str, bytes] | None:

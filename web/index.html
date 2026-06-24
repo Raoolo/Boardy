@@ -525,11 +525,11 @@
     <div id="chat"></div>
     <div class="composer-wrap">
       <form id="f">
-        <!-- Allega foto del regolamento → OCR. Formati: JPG, PNG, WebP. -->
-        <input id="photoInput" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden />
+        <!-- Allega un PDF (indicizzato) oppure foto del regolamento (→ OCR). -->
+        <input id="photoInput" type="file" accept="application/pdf,image/jpeg,image/png,image/webp" multiple hidden />
         <button class="attach" id="photoBtn" type="button"
-                title="Carica foto di un regolamento (JPG, PNG, WebP) e leggile via OCR"
-                aria-label="Carica foto del regolamento">📷</button>
+                title="Carica un regolamento: un PDF, oppure foto (JPG, PNG, WebP) lette via OCR"
+                aria-label="Carica un regolamento (PDF o foto)">📎</button>
         <input id="m" type="text" autocomplete="off"
                placeholder="Quante bustine 63,5×88 devo comprare?" autofocus />
         <button class="send" id="b" type="submit">Invia</button>
@@ -1007,12 +1007,22 @@
     openRulebookModal(`${files.length} foto (${kb.toFixed(0)} KB) → lettura OCR del regolamento`);
   }
 
-  // Tasto 📷 accanto a Invia: apre il selettore file e poi il modal.
+  // Tasto 📎 accanto a Invia: apre il selettore file e poi il modal.
+  // Accetta UN PDF (flusso indicizzazione) o una/più foto (flusso OCR), come
+  // il drag-and-drop — così l'utente può anche caricare i PDF scaricati.
   photoBtn.addEventListener('click', () => photoInput.click());
   photoInput.addEventListener('change', () => {
     const files = Array.from(photoInput.files || []);
     photoInput.value = '';   // reset: permette di riselezionare gli stessi file
-    startPhotosUpload(files);
+    if (files.length === 1 && isPdf(files[0])) {
+      pendingFile = files[0];
+      pendingImages = null;
+      openRulebookModal(`File: ${pendingFile.name} (${(pendingFile.size / 1024).toFixed(0)} KB)`);
+    } else if (files.length && files.every(isImg)) {
+      startPhotosUpload(files);
+    } else if (files.length) {
+      alert('Seleziona UN PDF, oppure una o più foto del regolamento (JPG, PNG, WebP).');
+    }
   });
 
   async function refreshGameNames() {
