@@ -40,6 +40,18 @@ def _is_transient(err: Exception) -> bool:
     msg = str(err).lower()
     return any(m in msg for m in _TRANSIENT_MARKERS)
 
+
+# Rate-limit / quota exhaustion (429 RESOURCE_EXHAUSTED) on the free tier does NOT
+# recover within a request — retrying every page is just slow. Detect it so the
+# caller can bail early and tell the user "riprova più tardi" instead of grinding
+# through N pages × retries × backoff.
+_RATE_LIMIT_MARKERS = ("429", "resource_exhausted", "quota", "rate limit", "rate_limit")
+
+
+def _is_rate_limit(err: Exception) -> bool:
+    msg = str(err).lower()
+    return any(m in msg for m in _RATE_LIMIT_MARKERS)
+
 # One image at a time keeps page-number detection and the per-page legibility
 # verdict unambiguous (batching multiple pages in one call blurs both).
 _PROMPT = (
@@ -97,12 +109,18 @@ def _mime_for(image: bytes) -> str:
     return "image/jpeg"
 
 
-def transcribe_images(images: list[bytes], game_name: str) -> list[dict]:
+def transcribe_images(images: list[bytes], game_name: str, *,
+                      stop_on_rate_limit: bool = False) -> list[dict]:
     """OCR each photo via Gemini. Returns one dict per image, in input order.
 
     Each dict: {order, text_markdown, page_number_printed, legibility, issues,
     looks_like_rulebook_page, error?}. A per-image failure is captured in `error`
     rather than aborting the whole batch, so one bad photo doesn't lose the rest.
+
+    `stop_on_rate_limit`: if a page fails with a quota/rate-limit error (429), stop
+    processing the rest (they'd fail too) and mark them skipped. Used by the PDF
+    auto-OCR path so a dead free-tier quota fails in seconds, not minutes. Photo
+    uploads leave it False (fewer pages, worth attempting each).
     """
     from google.genai import types
 
@@ -111,8 +129,19 @@ def transcribe_images(images: list[bytes], game_name: str) -> list[dict]:
     prompt = _PROMPT.format(game=game_name)
 
     results: list[dict] = []
+    rate_limited = False
     for i, image in enumerate(images):
         entry: dict = {"order": i}
+        if rate_limited:
+            # A prior page hit the quota wall; don't bother calling for the rest.
+            entry.update({
+                "text_markdown": "", "page_number_printed": None,
+                "legibility": "poor", "issues": ["saltata: quota OCR esaurita"],
+                "looks_like_rulebook_page": True,
+                "error": "skipped: rate limit", "rate_limited": True,
+            })
+            results.append(entry)
+            continue
         last_err: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             try:
@@ -134,11 +163,15 @@ def transcribe_images(images: list[bytes], game_name: str) -> list[dict]:
                 break
             except Exception as e:  # noqa: BLE001 — surface per-page, keep going
                 last_err = e
-                if _is_transient(e) and attempt < _MAX_RETRIES - 1:
+                # 429/quota won't clear within the request → fail fast (no backoff
+                # retries). 503/overload is worth retrying.
+                if (_is_transient(e) and not _is_rate_limit(e)
+                        and attempt < _MAX_RETRIES - 1):
                     time.sleep(_RETRY_BACKOFF_S * (attempt + 1))
                     continue
                 break
         if last_err is not None:
+            is_rl = _is_rate_limit(last_err)
             entry.update({
                 "text_markdown": "",
                 "page_number_printed": None,
@@ -146,6 +179,9 @@ def transcribe_images(images: list[bytes], game_name: str) -> list[dict]:
                 "issues": [f"errore di lettura: {type(last_err).__name__}"],
                 "looks_like_rulebook_page": True,
                 "error": str(last_err),
+                "rate_limited": is_rl,
             })
+            if is_rl and stop_on_rate_limit:
+                rate_limited = True  # skip the remaining pages fast
         results.append(entry)
     return results

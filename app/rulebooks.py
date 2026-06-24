@@ -291,15 +291,20 @@ def _store_rulebook(
 
 
 def _ocr_pdf_to_pages(data: bytes, game_name: str, *,
-                      max_pages: int = 40, dpi: int = 150
+                      max_pages: int = 40, dpi: int = 120
                       ) -> tuple[list[tuple[int, str]], dict]:
     """Rasterize a (likely scanned) PDF and OCR each page via Gemini vision.
 
     Used as the fallback when pypdf finds NO extractable text (the PDF is a scan,
-    just images). Renders each page to a PNG (PyMuPDF, no system deps) and feeds
-    them to `app.ocr.transcribe_images` — the same vision OCR as the photo flow.
+    just images). Renders each page to a **JPEG** (PyMuPDF, no system deps) and
+    feeds them to `app.ocr.transcribe_images`. JPEG at dpi 120 keeps each page
+    well under ~1MB — PNG at dpi 150 was ~6MB/page (94MB for 15 pages), which
+    blew Gemini's free-tier token-per-minute quota and was slow to upload.
     Returns (pages, report) where pages is [(citation_page, text)]. Lazy-imports
     fitz + ocr so a text PDF never pays for them. Capped at `max_pages` pages.
+    On free-tier quota exhaustion (429) the OCR bails early — report carries
+    `rate_limited: True` so the caller can say "riprova più tardi" instead of
+    pretending the PDF is unreadable.
     """
     import fitz  # PyMuPDF
 
@@ -311,16 +316,20 @@ def _ocr_pdf_to_pages(data: bytes, game_name: str, *,
     for i, page in enumerate(doc):
         if i >= max_pages:
             break
-        images.append(page.get_pixmap(dpi=dpi).tobytes("png"))
+        pix = page.get_pixmap(dpi=dpi)
+        images.append(pix.pil_tobytes(format="JPEG", quality=80))
     doc.close()
     if not images:
         return [], {"ocr": True, "error": "no pages to rasterize"}
 
-    pages_ocr = ocr.transcribe_images(images, game_name)
+    pages_ocr = ocr.transcribe_images(images, game_name, stop_on_rate_limit=True)
     pages: list[tuple[int, str]] = []
     low_quality: list[int] = []
+    rate_limited = False
     running = 0
     for idx, p in enumerate(pages_ocr, start=1):
+        if p.get("rate_limited"):
+            rate_limited = True
         if p.get("legibility") == "poor":
             low_quality.append(idx)
         text = (p.get("text_markdown") or "").strip()
@@ -338,7 +347,11 @@ def _ocr_pdf_to_pages(data: bytes, game_name: str, *,
         "pages_with_text": len(pages),
         "low_quality_pages": low_quality,
         "truncated": n_total > len(images),
+        "rate_limited": rate_limited,
     }
+    if not pages and rate_limited:
+        report["error"] = ("quota OCR (Gemini, piano gratuito) esaurita — "
+                           "riprova tra qualche minuto")
     return pages, report
 
 
@@ -387,6 +400,15 @@ def ingest_bytes(game_name: str, data: bytes, *, source: str,
             import json as _json
             ocr_pages, rep = _ocr_pdf_to_pages(data, canonical)
             if not ocr_pages:
+                if rep.get("rate_limited"):
+                    # Temporary quota wall, NOT a bad PDF. Tell the model to stop
+                    # (retrying other scanned PDFs hits the same wall and loops).
+                    return {"error": "OCR temporaneamente non disponibile: "
+                                     f"{rep.get('error', 'quota Gemini esaurita')}. "
+                                     "NON riprovare con altri PDF ora — è un limite "
+                                     "di quota, non un problema del file. Riprova tra "
+                                     "qualche minuto o carica le foto del regolamento.",
+                            "ocr_rate_limited": True}
                 return {"error": "PDF scansionato e l'OCR non ha estratto testo utile "
                                  f"({rep.get('error', 'nessun testo')}). "
                                  "Prova a caricare delle foto più nitide del regolamento."}
