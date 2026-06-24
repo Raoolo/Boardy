@@ -6,10 +6,45 @@ Anthropic `tools=` argument.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any
 
 from . import audit
 from .db import get_conn
+
+# ── Tool registry ────────────────────────────────────────────────────────────
+# The three registries the chat loop needs — TOOL_FUNCS (name→func), WRITE_TOOLS
+# (guest gating) — used to be three hand-maintained literals that had to stay in
+# sync with the TOOLS schema list at the bottom. Keeping them aligned by hand was
+# a real bug class: a write tool missing from WRITE_TOOLS was once runnable by a
+# guest (the 2026-06-23 rulebook-download hole). Now each tool declares its name
+# and write-flag ONCE, co-located with the function, via @tool — and the
+# registries are assembled from that at the bottom, with a boot-time assert that
+# crashes on any schema↔function drift instead of failing silently.
+_TOOL_FUNCS: dict[str, Callable] = {}
+_WRITE_NAMES: set[str] = set()
+
+
+def tool(write: bool = False):
+    """Register a function as a chat tool.
+
+    The tool name IS `fn.__name__` and MUST match the `name` of a schema in
+    TOOLS (asserted at import). `write=True` adds it to WRITE_TOOLS (guest
+    gating) — declared HERE, next to the function, so it can't drift.
+
+    Put `@tool` as the INNERMOST decorator (touching the def) so it registers
+    the original function. If another decorator is ever stacked on top it must
+    use functools.wraps, or `fn.__name__` becomes 'wrapper' (the boot assert
+    would catch it, but better to avoid).
+    """
+    def deco(fn: Callable) -> Callable:
+        if fn.__name__ in _TOOL_FUNCS:
+            raise RuntimeError(f"tool {fn.__name__!r} registered twice")
+        _TOOL_FUNCS[fn.__name__] = fn
+        if write:
+            _WRITE_NAMES.add(fn.__name__)
+        return fn
+    return deco
 
 # Trusted-domain allowlist for web_search. Mirrors the old Anthropic
 # server-side allowlist so search quality on BGG / sleeve sites is preserved.
@@ -185,6 +220,7 @@ def _row_to_game_dict(row, conn, *, full: bool = False) -> dict:
 
 # ----- core tools -----
 
+@tool()
 def list_games(
     name_contains: str | None = None,
     players: int | None = None,
@@ -247,6 +283,7 @@ def list_games(
         return {"count": len(items), "items": items}
 
 
+@tool()
 def get_game(name: str) -> dict | None:
     """Get one game (case-insensitive name match) with all dimensions + sleeve requirements."""
     with get_conn() as conn:
@@ -264,6 +301,7 @@ def get_game(name: str) -> dict | None:
         return _row_to_game_dict(row, conn, full=True)
 
 
+@tool(write=True)
 def add_game(
     name: str,
     bgg_id: int | None = None,
@@ -342,6 +380,7 @@ def add_game(
     return {"ok": True, "id": gid, "name": name, "rulebook_autofetch": rb}
 
 
+@tool(write=True)
 def update_game(
     name: str,
     bgg_id: int | None = None,
@@ -435,6 +474,7 @@ def update_game(
     return result
 
 
+@tool(write=True)
 def delete_game(name: str, _source: str | None = None) -> dict:
     """Remove a game (cascade deletes dim links + sleeve requirements)."""
     with get_conn() as conn:
@@ -453,6 +493,7 @@ def delete_game(name: str, _source: str | None = None) -> dict:
     return {"ok": True, "deleted": name}
 
 
+@tool(write=True)
 def set_sleeve_requirements(name: str, requirements: list[dict],
                             _source: str | None = None) -> dict:
     """Replace sleeve requirements for a game. Items: {count, width_mm, height_mm, note?}.
@@ -477,20 +518,28 @@ def set_sleeve_requirements(name: str, requirements: list[dict],
                 f"Call update_game(name, sleeve_status='to_sleeve') first if "
                 f"this game actually needs sleeves recorded."
             )}
+        # Validate EVERY requirement BEFORE touching the DB. get_conn() returns a
+        # raw sqlite3.Connection, whose context manager COMMITS on clean exit —
+        # so a `return` mid-loop (after the DELETE) would commit the wipe and
+        # lose the existing requirements. Parse first, mutate only once all rows
+        # are known-good.
+        parsed: list[tuple] = []
+        for r in requirements:
+            try:
+                parsed.append((gid, int(r["count"]), float(r["width_mm"]),
+                               float(r["height_mm"]), r.get("note")))
+            except (KeyError, ValueError, TypeError) as e:
+                return {"error": f"bad requirement {r!r}: {e}"}
         # Snapshot existing requirements as a sorted list of tuples for diff readability.
         before_rows = [dict(r) for r in conn.execute(
             "SELECT count, width_mm, height_mm, note FROM sleeve_requirements WHERE game_id=? ORDER BY width_mm, height_mm",
             (gid,)).fetchall()]
         conn.execute("DELETE FROM sleeve_requirements WHERE game_id=?", (gid,))
-        for r in requirements:
-            try:
-                conn.execute(
-                    """INSERT INTO sleeve_requirements(game_id, count, width_mm, height_mm, note)
-                       VALUES(?,?,?,?,?)""",
-                    (gid, int(r["count"]), float(r["width_mm"]), float(r["height_mm"]), r.get("note")),
-                )
-            except (KeyError, ValueError, TypeError) as e:
-                return {"error": f"bad requirement {r!r}: {e}"}
+        conn.executemany(
+            """INSERT INTO sleeve_requirements(game_id, count, width_mm, height_mm, note)
+               VALUES(?,?,?,?,?)""",
+            parsed,
+        )
         # Single audit row capturing the whole replacement (the granularity here is the game).
         audit.log_change(conn, table="sleeve_requirements", row_id=gid, row_label=name,
                          action="update", field="requirements",
@@ -499,6 +548,7 @@ def set_sleeve_requirements(name: str, requirements: list[dict],
     return {"ok": True, "name": name, "rows": len(requirements)}
 
 
+@tool()
 def sleeve_summary() -> dict:
     """Per sleeve size: needed (sum across games), owned (inventory), to_buy. Returns `{count, items}`.
 
@@ -561,6 +611,7 @@ def sleeve_games_detail(status: str = "owned") -> dict:
     return by_size
 
 
+@tool()
 def games_ready_to_sleeve() -> dict:
     """Owned games with `sleeve_status='to_sleeve'` whose ENTIRE requirement
     list is covered by current sleeve_inventory. Returns:
@@ -665,6 +716,7 @@ def games_ready_to_sleeve() -> dict:
     }
 
 
+@tool()
 def sleeve_summary_wishlist() -> dict:
     """Per-size sleeve preview for WISHLIST games. Returns `{count, items}`.
 
@@ -694,6 +746,7 @@ def sleeve_summary_wishlist() -> dict:
     return {"count": len(items), "items": items}
 
 
+@tool()
 def list_inventory() -> dict:
     with get_conn() as conn:
         rows = conn.execute(
@@ -703,6 +756,7 @@ def list_inventory() -> dict:
     return {"count": len(items), "items": items}
 
 
+@tool(write=True)
 def update_inventory(width_mm: float, height_mm: float, count_owned: int,
                      brand: str | None = None, _source: str | None = None) -> dict:
     """Upsert a sleeve inventory row (sets ABSOLUTE count, not delta).
@@ -710,6 +764,8 @@ def update_inventory(width_mm: float, height_mm: float, count_owned: int,
     For "I just bought N more" use `add_to_inventory` instead — it does the
     arithmetic server-side so the model can't get the addition wrong.
     """
+    if not isinstance(count_owned, int) or count_owned < 0:
+        return {"error": "count_owned must be an integer >= 0"}
     label = f"{width_mm}x{height_mm}" + (f"/{brand}" if brand else "")
     with get_conn() as conn:
         before = conn.execute(
@@ -744,6 +800,7 @@ def update_inventory(width_mm: float, height_mm: float, count_owned: int,
             "previous_count": old_count}
 
 
+@tool(write=True)
 def add_to_inventory(width_mm: float, height_mm: float, delta: int,
                      brand: str | None = None, note: str | None = None,
                      _source: str | None = None) -> dict:
@@ -797,6 +854,7 @@ def add_to_inventory(width_mm: float, height_mm: float, delta: int,
             "brand": brand}
 
 
+@tool()
 def recent_changes(limit: int = 20, table: str | None = None,
                    game_name: str | None = None) -> dict:
     """Read the audit log: last N writes, optionally filtered by table or by game.
@@ -841,6 +899,7 @@ def recent_changes(limit: int = 20, table: str | None = None,
         return {"count": len(items), "items": items}
 
 
+@tool(write=True)
 def ingest_rulebook(game_name: str, pdf_path: str, _source: str | None = None) -> dict:
     """Index a rulebook PDF for semantic search. Lazy-imported to avoid loading
     the embedding model at server boot — first call costs ~5s on warm cache."""
@@ -967,6 +1026,7 @@ def ingest_rulebook_photos(game_name: str, images: list[bytes],
     return result
 
 
+@tool()
 def ask_rules(game_name: str, question: str, k: int = 5) -> dict:
     """Return top-k rulebook excerpts most relevant to the question.
 
@@ -985,6 +1045,7 @@ def ask_rules(game_name: str, question: str, k: int = 5) -> dict:
     return {"game": game_name, "question": question, "chunks": chunks}
 
 
+@tool()
 def list_rulebooks() -> dict:
     """List all ingested rulebooks (one row per game+source). Returns `{count, items}`."""
     from . import rulebooks
@@ -1022,6 +1083,7 @@ def _bgg_candidates(bgg_id: int) -> list[dict]:
         return []
 
 
+@tool()
 def find_rulebook(game_name: str, bgg_id: int | None = None) -> dict:
     """Find downloadable rulebooks for a game. Does NOT download.
 
@@ -1158,6 +1220,7 @@ def _resolve_game_bgg_id(game_name: str) -> tuple[str | None, int | None]:
     return row["name"], row["bgg_id"]
 
 
+@tool(write=True)
 def download_rulebook(game_name: str, url: str | None = None,
                       bgg_filepageid: int | None = None, override: bool = False,
                       _source: str | None = None) -> dict:
@@ -1335,6 +1398,7 @@ def _backfill_rulebook(game_id: int) -> dict:
         return {"status": "skipped", "reason": f"{type(e).__name__}: {e}"}
 
 
+@tool()
 def web_search(query: str, include_domains: list[str] | None = None,
                max_results: int = 5, search_depth: str = "advanced",
                include_raw_content: bool = True,
@@ -1427,6 +1491,7 @@ def web_search(query: str, include_domains: list[str] | None = None,
     }
 
 
+@tool()
 def bgg_search(query: str, types: list[str] | None = None) -> dict:
     """Search the BoardGameGeek XML API for games matching a name.
 
@@ -1460,6 +1525,7 @@ def bgg_search(query: str, types: list[str] | None = None) -> dict:
     return {"query": query, "count": len(candidates), "candidates": candidates[:25]}
 
 
+@tool()
 def bgg_lookup(bgg_id: int) -> dict:
     """Fetch full structured metadata for a single game from the BGG XML API.
 
@@ -1537,6 +1603,7 @@ def _compare_sleeve_reqs(syg: list[dict], bgg: list[dict],
             "only_sleeveyourgames": only_syg, "only_bgg": only_bgg}
 
 
+@tool()
 def sleeve_lookup(name: str, bgg_id: int | None = None) -> dict:
     """Look up card-sleeve sizes + counts for a game (deterministic, no scraping).
 
@@ -1641,6 +1708,7 @@ def sleeve_lookup(name: str, bgg_id: int | None = None) -> dict:
     return out
 
 
+@tool()
 def search_games_semantic(
     query: str,
     players: int | None = None,
@@ -1697,6 +1765,7 @@ def search_games_semantic(
 _PRIORITY_VALUES = {"high", "medium", "low"}
 
 
+@tool(write=True)
 def add_to_wishlist(
     name: str,
     priority: str | None = None,
@@ -1783,6 +1852,7 @@ def add_to_wishlist(
             "priority": priority}
 
 
+@tool()
 def list_wishlist(priority: str | None = None, limit: int = 100) -> dict:
     """List wishlist items as `{count, items}`. Optional `priority` filter.
 
@@ -1809,6 +1879,7 @@ def list_wishlist(priority: str | None = None, limit: int = 100) -> dict:
     return {"count": len(items), "items": items}
 
 
+@tool(write=True)
 def update_wishlist(
     name: str,
     priority: str | None = None,
@@ -1893,6 +1964,7 @@ def update_wishlist(
     return {"ok": True, "name": name, "updated": list(fields.keys()), "audit_rows": n_logged}
 
 
+@tool(write=True)
 def mark_as_owned(name: str, sleeve_status: str = "unknown",
                   _source: str | None = None) -> dict:
     """Promote a wishlist row to an owned game.
@@ -1932,6 +2004,7 @@ def mark_as_owned(name: str, sleeve_status: str = "unknown",
     return {"ok": True, "name": name, "status": "owned", "sleeve_status": sleeve_status}
 
 
+@tool(write=True)
 def remove_from_wishlist(name: str, _source: str | None = None) -> dict:
     """Delete a wishlist row. Refuses if the row is owned (use `delete_game`)."""
     with get_conn() as conn:
@@ -1956,6 +2029,7 @@ def remove_from_wishlist(name: str, _source: str | None = None) -> dict:
     return {"ok": True, "deleted": name}
 
 
+@tool()
 def list_dimension(table: str) -> dict:
     """List unique values of a dimension table with their game count. Returns `{count, items}`."""
     if table not in {"designers", "publishers", "categories", "mechanics"}:
@@ -2537,58 +2611,26 @@ TOOLS = [
 ]
 
 
-TOOL_FUNCS = {
-    "list_games":              list_games,
-    "get_game":                get_game,
-    "add_game":                add_game,
-    "update_game":             update_game,
-    "delete_game":             delete_game,
-    "set_sleeve_requirements": set_sleeve_requirements,
-    "sleeve_summary":          sleeve_summary,
-    "sleeve_summary_wishlist": sleeve_summary_wishlist,
-    "games_ready_to_sleeve":   games_ready_to_sleeve,
-    "list_inventory":          list_inventory,
-    "update_inventory":        update_inventory,
-    "add_to_inventory":        add_to_inventory,
-    "recent_changes":          recent_changes,
-    "list_dimension":          list_dimension,
-    "search_games_semantic":   search_games_semantic,
-    "add_to_wishlist":         add_to_wishlist,
-    "list_wishlist":           list_wishlist,
-    "update_wishlist":         update_wishlist,
-    "mark_as_owned":           mark_as_owned,
-    "remove_from_wishlist":    remove_from_wishlist,
-    "ingest_rulebook":         ingest_rulebook,
-    "ask_rules":               ask_rules,
-    "list_rulebooks":          list_rulebooks,
-    "find_rulebook":           find_rulebook,
-    "download_rulebook":       download_rulebook,
-    "bgg_search":              bgg_search,
-    "bgg_lookup":              bgg_lookup,
-    "sleeve_lookup":           sleeve_lookup,
-    "web_search":              web_search,
-}
+# ── Registries assembled from the @tool decorators ───────────────────────────
+# name→func and the guest-gating write set are built from what each function
+# declared via @tool (see the decorator near the top). No hand-maintained
+# literals = no chance of a write tool silently missing from WRITE_TOOLS.
+TOOL_FUNCS = _TOOL_FUNCS
 
+# Source of truth per il gating guest/owner: chat.py filtra fuori questi tool dal
+# registry quando il chiamante e' guest, e blocca a runtime nel dispatch. Il set
+# e' popolato dal flag `write=True` del decorator, accanto a ogni funzione, cosi'
+# non puo' divergere (storicamente: `ingest_rulebook` scrive ma non ha `_source`,
+# quindi l'euristica "ha _source" non bastava — ora e' esplicito nel decorator).
+WRITE_TOOLS: set[str] = _WRITE_NAMES
 
-# Source of truth per il gating guest/owner. Tutti i tool che mutano stato
-# (DB o filesystem) devono essere qui dentro — chat.py li filtra fuori dal
-# registry quando il chiamante e' guest (non autenticato).
-#
-# Non basta affidarsi all'euristica "ha kwarg _source" (usata per il
-# `_source` injection): `ingest_rulebook` scrive su `rulebooks`/`chunks` ma
-# non dichiara `_source`. Mantenere l'insieme esplicito = piu' lavoro al
-# momento di aggiungere un tool, ma zero rischi di buchi silenziosi.
-WRITE_TOOLS: set[str] = {
-    "add_game",
-    "update_game",
-    "delete_game",
-    "set_sleeve_requirements",
-    "update_inventory",
-    "add_to_inventory",
-    "add_to_wishlist",
-    "update_wishlist",
-    "mark_as_owned",
-    "remove_from_wishlist",
-    "ingest_rulebook",
-    "download_rulebook",
-}
+# Boot-time integrity check: every schema in TOOLS must have a registered
+# function and vice versa. A typo'd name, a tool added to TOOLS but not
+# decorated (or decorated but not in TOOLS) crashes the import LOUDLY instead of
+# failing silently — exactly the drift that let a guest run download_rulebook.
+_schema_names = {t["name"] for t in TOOLS}
+if _schema_names != set(TOOL_FUNCS):
+    raise RuntimeError(
+        f"tool registry mismatch — schema-only: {sorted(_schema_names - set(TOOL_FUNCS))}, "
+        f"func-only: {sorted(set(TOOL_FUNCS) - _schema_names)}"
+    )

@@ -144,6 +144,12 @@ def chat_endpoint(
                     loaded is None
                     or loaded.get("actor_role") != "guest"
                     or loaded.get("origin") != (req.guest_origin or "telegram")
+                    # Bind the conversation to its original guest: without this an
+                    # attacker hitting /chat directly could continue (read + append)
+                    # another guest's chat just by guessing a conversation_id. The
+                    # bot already gatekeeps which conv_id a chat_id may continue,
+                    # but the endpoint must not trust that on its own.
+                    or str(loaded.get("actor_id")) != str(req.guest_actor_id)
                 ):
                     raise HTTPException(404, f"conversation {conv_id} not found")
                 history = loaded["history"]

@@ -61,3 +61,13 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+# Make the repo root importable so `from app import ...` works without install.
+pythonpath = ["."]
+testpaths = ["tests"]
