@@ -840,7 +840,8 @@ async def upload_rulebook_photos(
             images.append(data)
     if not images:
         raise HTTPException(400, "le foto sono vuote")
-    result = tools_mod.ingest_rulebook_photos(game_name, images)
+    actor = f"web:rulebooks/user:{user['username']}" if user else "web:rulebooks"
+    result = tools_mod.ingest_rulebook_photos(game_name, images, actor=actor)
     if "error" in result:
         raise HTTPException(400, result["error"])
     return result

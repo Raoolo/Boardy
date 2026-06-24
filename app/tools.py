@@ -811,15 +811,19 @@ def recent_changes(limit: int = 20, table: str | None = None,
                                (game_name,)).fetchone()
             if not row:
                 return {"error": f"Game {game_name!r} not found"}
-            gid = row["id"]
+            gid, gname = row["id"], row["name"]
+            # rulebooks rows are keyed by rulebook_id (not game_id) and a prior
+            # row is DELETEd on re-ingest, so match them by the captured
+            # row_label (canonical game name) — survives the delete + renames.
             rows = conn.execute(
                 """SELECT id, ts, table_name, row_id, row_label, action, field,
                           old_value, new_value, source
                    FROM changes
                    WHERE (table_name='games' AND row_id=?)
                       OR (table_name='sleeve_requirements' AND row_id=?)
+                      OR (table_name='rulebooks' AND row_label=?)
                    ORDER BY id DESC LIMIT ?""",
-                (gid, gid, limit),
+                (gid, gid, gname, limit),
             ).fetchall()
             import json as _json
             out = []
@@ -837,14 +841,15 @@ def recent_changes(limit: int = 20, table: str | None = None,
         return {"count": len(items), "items": items}
 
 
-def ingest_rulebook(game_name: str, pdf_path: str) -> dict:
+def ingest_rulebook(game_name: str, pdf_path: str, _source: str | None = None) -> dict:
     """Index a rulebook PDF for semantic search. Lazy-imported to avoid loading
     the embedding model at server boot — first call costs ~5s on warm cache."""
     from . import rulebooks
-    return rulebooks.ingest(game_name, pdf_path)
+    return rulebooks.ingest(game_name, pdf_path, actor=_source)
 
 
-def ingest_rulebook_photos(game_name: str, images: list[bytes]) -> dict:
+def ingest_rulebook_photos(game_name: str, images: list[bytes],
+                           actor: str | None = None) -> dict:
     """Read photos of a physical rulebook via vision OCR and index them.
 
     Shared orchestration for the web endpoint and the Telegram bot:
@@ -950,7 +955,7 @@ def ingest_rulebook_photos(game_name: str, images: list[bytes]) -> dict:
     source = f"photos:{rulebooks._norm_name(game_name).replace(' ', '-')}:{int(time.time())}"
     result = rulebooks.ingest_pages(
         game_name, pages, source=source, pdf_blob=pdf_blob,
-        ocr_report=json.dumps(report, ensure_ascii=False),
+        ocr_report=json.dumps(report, ensure_ascii=False), actor=actor,
     )
     if "error" in result:
         result.setdefault("warnings", warnings)
@@ -1166,7 +1171,7 @@ def download_rulebook(game_name: str, url: str | None = None,
             return {"error": r["error"], "bgg_filepageid": bgg_filepageid}
         result = rulebooks.ingest_bytes(game_name, r["data"],
                                         source=f"bgg:filepage/{bgg_filepageid}",
-                                        enforce_lang=False)
+                                        enforce_lang=False, actor=_source)
         result["bgg_filepageid"] = bgg_filepageid
         return result
 
@@ -1178,7 +1183,8 @@ def download_rulebook(game_name: str, url: str | None = None,
     # No deterministic provenance for arbitrary URLs → ingest_bytes' content-based
     # name check warns if the PDF text doesn't mention the game (wrong-game guard).
     # source=url → re-download replaces the row via UNIQUE(game_id, source_path)
-    result = rulebooks.ingest_bytes(game_name, dl["data"], source=url, enforce_lang=False)
+    result = rulebooks.ingest_bytes(game_name, dl["data"], source=url,
+                                    enforce_lang=False, actor=_source)
     result["url"] = url
     return result
 
@@ -1244,7 +1250,8 @@ def _backfill_rulebook(game_id: int) -> dict:
             strong.sort(key=lambda h: (h["lang"] != "EN", len(h["title"])))
             dl = _fetch_pdf_bytes(strong[0]["url"])
             if "error" not in dl:
-                res = rulebooks.ingest_bytes(name, dl["data"], source=strong[0]["url"])
+                res = rulebooks.ingest_bytes(name, dl["data"], source=strong[0]["url"],
+                                             actor="hook:add_game/1j1ju")
                 if res.get("ok"):
                     return {"status": "fetched", "source": strong[0]["url"]}
 
@@ -1257,7 +1264,8 @@ def _backfill_rulebook(game_id: int) -> dict:
                 r = fetch_one(cands[0]["filepageid"])
                 if "data" in r:
                     res = rulebooks.ingest_bytes(
-                        name, r["data"], source=f"bgg:filepage/{cands[0]['filepageid']}")
+                        name, r["data"], source=f"bgg:filepage/{cands[0]['filepageid']}",
+                        actor="hook:add_game/bgg")
                     if res.get("ok"):
                         return {"status": "fetched",
                                 "source": f"bgg:filepage/{cands[0]['filepageid']}"}

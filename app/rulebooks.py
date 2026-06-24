@@ -21,6 +21,7 @@ import numpy as np
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 
+from . import audit
 from .db import get_conn
 
 EMBED_MODEL_NAME = "intfloat/multilingual-e5-base"
@@ -239,6 +240,8 @@ def _store_rulebook(
     pages: list[tuple[int, str]],
     pdf_blob: bytes,
     ocr_report: str | None = None,
+    game_label: str | None = None,
+    actor: str | None = None,
 ) -> tuple[int, int]:
     """Chunk → embed → store a rulebook + its chunks. Returns (rulebook_id, n_chunks).
 
@@ -247,6 +250,11 @@ def _store_rulebook(
     (pypdf text extraction vs. vision transcription). Re-ingesting the same
     `source` replaces the prior row via the DELETE below (UNIQUE(game_id, source_path)).
     Raises ValueError("no-chunks") if the pages produce 0 chunks.
+
+    Audit: every successful store logs one `insert` row into `changes`
+    (table `rulebooks`, `source`=`actor`) so rulebook downloads/uploads are
+    traceable just like games/sleeve writes. A re-ingest (same source) is logged
+    as `replace` since the DELETE above drops the prior row.
     """
     chunks = _chunk_pages(pages)
     if not chunks:
@@ -255,6 +263,9 @@ def _store_rulebook(
     embeddings = _embed_passages([c["text"] for c in chunks])
 
     # Replace any prior rulebook for this game+source
+    prior = conn.execute(
+        "SELECT id FROM rulebooks WHERE game_id=? AND source_path=?", (game_id, source)
+    ).fetchone()
     conn.execute("DELETE FROM rulebooks WHERE game_id=? AND source_path=?", (game_id, source))
     cur = conn.execute(
         """INSERT INTO rulebooks(game_id, source_path, page_count, embedding_model, pdf_blob, ocr_report)
@@ -268,11 +279,19 @@ def _store_rulebook(
                VALUES(?,?,?,?,?,?)""",
             (rb_id, i, chunk["page_start"], chunk["page_end"], chunk["text"], emb.tobytes()),
         )
+
+    audit.log_change(
+        conn, table="rulebooks", row_id=rb_id, row_label=game_label,
+        action="replace" if prior else "insert", field=None,
+        old=({"rulebook_id": prior["id"]} if prior else None),
+        new={"source_path": source, "pages": len(pages), "chunks": len(chunks)},
+        source=actor,
+    )
     return rb_id, len(chunks)
 
 
 def ingest_bytes(game_name: str, data: bytes, *, source: str,
-                 enforce_lang: bool = True) -> dict:
+                 enforce_lang: bool = True, actor: str | None = None) -> dict:
     """Index a rulebook from raw PDF bytes; stores the PDF itself in the DB.
 
     `source` is a stable handle (file path or origin URL) used for dedup via
@@ -338,6 +357,7 @@ def ingest_bytes(game_name: str, data: bytes, *, source: str,
         try:
             rb_id, n_chunks = _store_rulebook(
                 conn, game_id=game_id, source=source, pages=pages, pdf_blob=data,
+                game_label=canonical, actor=actor,
             )
         except ValueError:
             return {"error": "PDF parsed but produced 0 chunks"}
@@ -362,6 +382,7 @@ def ingest_pages(
     source: str,
     pdf_blob: bytes,
     ocr_report: str | None = None,
+    actor: str | None = None,
 ) -> dict:
     """Index a rulebook from already-transcribed pages (e.g. photo OCR).
 
@@ -385,6 +406,7 @@ def ingest_pages(
             rb_id, n_chunks = _store_rulebook(
                 conn, game_id=game_id, source=source, pages=pages,
                 pdf_blob=pdf_blob, ocr_report=ocr_report,
+                game_label=canonical, actor=actor,
             )
         except ValueError:
             return {"error": "le foto sono state lette ma non hanno prodotto testo indicizzabile"}
@@ -400,7 +422,8 @@ def ingest_pages(
     }
 
 
-def ingest(game_name: str, pdf_path: str, *, enforce_lang: bool = False) -> dict:
+def ingest(game_name: str, pdf_path: str, *, enforce_lang: bool = False,
+           actor: str | None = None) -> dict:
     """Parse a local PDF rulebook and index it under the matching game.
 
     Thin wrapper over `ingest_bytes` — reads the file, then stores its bytes in
@@ -413,7 +436,8 @@ def ingest(game_name: str, pdf_path: str, *, enforce_lang: bool = False) -> dict
         return {"error": f"file not found: {p}"}
     if not p.suffix.lower() == ".pdf":
         return {"error": "expected a .pdf file"}
-    return ingest_bytes(game_name, p.read_bytes(), source=str(p), enforce_lang=enforce_lang)
+    return ingest_bytes(game_name, p.read_bytes(), source=str(p),
+                        enforce_lang=enforce_lang, actor=actor)
 
 
 def get_pdf(game_name: str) -> tuple[str, bytes] | None:
