@@ -409,6 +409,7 @@
       <span class="spacer"></span>
       <button class="send" id="chat-send">Invia</button>
       <button class="reset-conv" id="chat-reset" title="Avvia una nuova conversazione (perde il contesto multi-turno).">Nuova chat</button>
+      <button class="reset-conv" id="open-chat-btn" hidden title="Continua questa conversazione nella chat completa">↗ Apri in chat</button>
     </div>
     <div class="chat-status" id="chat-status"></div>
   </div>
@@ -730,6 +731,8 @@ function setChatConvId(id) {
   CHAT.convId = id;
   if (id) localStorage.setItem(CHAT_KEY, String(id));
   else    localStorage.removeItem(CHAT_KEY);
+  const ocb = document.getElementById("open-chat-btn");
+  if (ocb) ocb.hidden = !id;
 }
 
 // Flatten markdown into a one-line readable status. The assistant tends to
@@ -793,7 +796,7 @@ async function loadChatConv() {
     const r = await fetch("/conversations/" + saved);
     if (!r.ok) { setChatConvId(null); return; }
     const c = await r.json();
-    CHAT.convId = c.id;
+    setChatConvId(c.id);
     const txt = lastAssistantText(c.history || []);
     if (txt) setChatStatus(txt, "");
   } catch (e) { setChatConvId(null); }
@@ -858,6 +861,9 @@ async function sendChat() {
   }
 }
 
+document.getElementById("open-chat-btn").addEventListener("click", () => {
+  if (CHAT.convId) location.href = "/?conv=" + CHAT.convId;
+});
 document.getElementById("chat-send").addEventListener("click", sendChat);
 document.getElementById("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {

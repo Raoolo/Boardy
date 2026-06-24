@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Iterable
 
@@ -106,13 +107,23 @@ def _game_name_in_text(canonical: str, pages: list[tuple[int, str]]) -> bool:
     return any(w in sample for w in tokens)
 
 _model: SentenceTransformer | None = None
+_model_lock = threading.Lock()
 
 
 def _model_lazy() -> SentenceTransformer:
-    """Load the embedding model once per process. ~3s startup on CPU."""
+    """Load the embedding model once per process. ~3s startup on CPU.
+
+    Double-checked locking: FastAPI runs the sync endpoints in a threadpool, so
+    two concurrent first-callers could otherwise each load the 280MB e5 model.
+    The lock makes the load happen exactly once; the outer `is None` check keeps
+    the hot path lock-free once the model is cached. `games_semantic` reuses this
+    same global, so it's covered too.
+    """
     global _model
     if _model is None:
-        _model = SentenceTransformer(EMBED_MODEL_NAME)
+        with _model_lock:
+            if _model is None:
+                _model = SentenceTransformer(EMBED_MODEL_NAME)
     return _model
 
 

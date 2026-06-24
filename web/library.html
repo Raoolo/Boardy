@@ -355,6 +355,19 @@
     0%, 100% { opacity: 0.3; transform: scale(0.8); }
     50%      { opacity: 1;   transform: scale(1.2); }
   }
+  /* Affordances under the status line: "perché" panel toggle + open-in-chat. */
+  .smart-actions { display: flex; gap: 16px; margin-top: 6px; }
+  .smart-link {
+    background: none; border: 0; padding: 0; cursor: pointer;
+    color: var(--accent); font-size: 12px; font-family: inherit;
+  }
+  .smart-link:hover { text-decoration: underline; }
+  .reasoning-panel {
+    margin-top: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.5;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--accent-dim);
+    border-radius: 8px; color: var(--muted);
+  }
+  .reasoning-panel b { color: var(--text, #e6e6e6); font-weight: 600; }
 
   /* "Filtro semantico attivo" indicator — shown when state.semanticIds is set. */
   .semantic-active {
@@ -435,6 +448,11 @@
     <button class="clear" id="smart-clear" title="Azzera tutti i filtri">Azzera</button>
   </div>
   <div class="smart-status" id="smart-status"></div>
+  <div class="smart-actions" id="smart-actions" hidden>
+    <button type="button" class="smart-link" id="why-btn">ℹ️ Perché questi giochi?</button>
+    <button type="button" class="smart-link" id="open-chat-btn">↗ Apri in chat completa</button>
+  </div>
+  <div class="reasoning-panel" id="reasoning-panel" hidden></div>
 </section>
 
 <div class="filters">
@@ -1056,16 +1074,19 @@ async function sendSmartQuery() {
       clearSemantic();
       applyFilters();
       setStatus("✓ Filtri azzerati", "success");
+      hideSmartActions();
     } else if (data.applied) {
       applySmartFilters(data.filters || {}, data.semantic_ids, q);
       // Status carries the count + a hint of what was filtered. The LLM's
       // own message is dropped on the floor — the dropdowns show it
       // visually and a chat bubble would be redundant.
       setStatus(`✓ ${state.filtered.length} giochi trovati`, "success");
+      showSmartActions(data.reasoning || null, q);
     } else {
       // Ambiguous / non-filter query: preserve existing filters, just
       // surface the LLM's reply briefly so the user knows it ran.
       setStatus(data.message || "Nessun filtro estratto", "");
+      hideSmartActions();
     }
     // Clear input only on success (so on error the user can retry/edit).
     ta.value = "";
@@ -1077,6 +1098,59 @@ async function sendSmartQuery() {
     ta.focus();
   }
 }
+
+// ── "Perché questi giochi?" + "Apri in chat completa" ─────────────────
+const TIER_LABEL = {1:"Molto Semplice",2:"Semplice",3:"Medio",4:"Complesso",5:"Esperto"};
+const SLEEVE_LABEL = {sleeved:"imbustati",to_sleeve:"da imbustare",na:"senza buste",unknown:"da verificare"};
+let lastReasoning = null;
+let lastQuery = "";
+
+// Human, Italian one-liner from the extracted filters (+ optional semantic query).
+function describeFilters(ex, semQuery) {
+  const parts = [];
+  if (semQuery) parts.push(`vibe «${semQuery}»`);
+  if (ex.players != null) parts.push(ex.players >= 6 ? "6+ giocatori" : `${ex.players} giocatori`);
+  if (ex.complexity_max_tier) parts.push(`complessità ≤ ${TIER_LABEL[ex.complexity_max_tier] || ex.complexity_max_tier}`);
+  if (ex.complexity_min_tier) parts.push(`complessità ≥ ${TIER_LABEL[ex.complexity_min_tier] || ex.complexity_min_tier}`);
+  if (ex.max_duration_min) parts.push(`≤ ${ex.max_duration_min} min`);
+  if (ex.sleeve_status) parts.push(SLEEVE_LABEL[ex.sleeve_status] || ex.sleeve_status);
+  if (ex.friendly_tags && ex.friendly_tags.length) parts.push(ex.friendly_tags.map(prettifyTag).join(", "));
+  if (ex.name_contains) parts.push(`nome contiene «${ex.name_contains}»`);
+  return parts.join(" · ") || "nessun filtro specifico";
+}
+
+function showSmartActions(reasoning, query) {
+  lastReasoning = reasoning;
+  lastQuery = query;
+  document.getElementById("smart-actions").hidden = false;
+  document.getElementById("reasoning-panel").hidden = true;   // collapsed until clicked
+}
+function hideSmartActions() {
+  lastReasoning = null;
+  document.getElementById("smart-actions").hidden = true;
+  document.getElementById("reasoning-panel").hidden = true;
+}
+
+document.getElementById("why-btn").addEventListener("click", () => {
+  const panel = document.getElementById("reasoning-panel");
+  if (!panel.hidden) { panel.hidden = true; return; }       // toggle off
+  const r = lastReasoning || { path: "structured", extracted: {}, semantic_query: null, top_matches: [] };
+  const pathLabel = r.path === "semantic" ? "Filtro semantico" : "Filtro strutturale";
+  let html = `<b>${pathLabel}.</b> Estratto: ${escapeHtml(describeFilters(r.extracted || {}, r.semantic_query))}.`;
+  if (r.path === "semantic" && r.top_matches && r.top_matches.length) {
+    const tops = r.top_matches.map(m => `${escapeHtml(m.name)} <b>${m.score.toFixed(2)}</b>`).join(" · ");
+    html += `<br>Match più vicini: ${tops}`;
+  }
+  panel.innerHTML = html;
+  panel.hidden = false;
+});
+
+document.getElementById("open-chat-btn").addEventListener("click", () => {
+  const r = lastReasoning || { extracted: {}, semantic_query: null };
+  const summary = describeFilters(r.extracted || {}, r.semantic_query);
+  const seed = `In libreria sto guardando i giochi con questi filtri: ${summary}. Aiutami a scegliere o dimmi di più su uno di questi.`;
+  location.href = "/?seed=" + encodeURIComponent(seed);
+});
 
 document.getElementById("smart-send").addEventListener("click", sendSmartQuery);
 document.getElementById("smart-input").addEventListener("keydown", (e) => {
@@ -1098,6 +1172,7 @@ document.getElementById("smart-clear").addEventListener("click", () => {
   document.getElementById("smart-input").value = "";
   document.getElementById("smart-input").style.height = "auto";
   setStatus("");
+  hideSmartActions();
   applyFilters();
 });
 

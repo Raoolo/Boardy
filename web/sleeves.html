@@ -402,6 +402,7 @@
       <textarea id="chat-input" placeholder="Scrivi una richiesta in italiano…" rows="1"></textarea>
       <button class="send" id="chat-send">Invia</button>
       <button class="clear" id="chat-reset" title="Avvia nuova conversazione">Nuova chat</button>
+      <button class="clear" id="open-chat-btn" hidden title="Continua questa conversazione nella chat completa">↗ Apri in chat</button>
     </div>
     <div class="smart-status" id="chat-status"></div>
   </div>
@@ -795,6 +796,9 @@ function setChatConvId(id) {
   CHAT.convId = id;
   if (id) localStorage.setItem(CHAT_KEY, String(id));
   else    localStorage.removeItem(CHAT_KEY);
+  // Show "↗ Apri in chat" only when there's a real (owner) conversation to open.
+  const ocb = document.getElementById("open-chat-btn");
+  if (ocb) ocb.hidden = !id;
 }
 
 // Flatten LLM markdown into a single readable line for the 2-row status
@@ -859,7 +863,7 @@ async function loadChatConv() {
     const r = await fetch("/conversations/" + saved);
     if (!r.ok) { setChatConvId(null); return; }
     const c = await r.json();
-    CHAT.convId = c.id;
+    setChatConvId(c.id);
     // No history rendering — but if the last turn was an assistant question
     // ("che dimensione?"), surface it so the user knows what was pending.
     const txt = lastAssistantText(c.history || []);
@@ -905,6 +909,9 @@ async function sendChat() {
   }
 }
 
+document.getElementById("open-chat-btn").addEventListener("click", () => {
+  if (CHAT.convId) location.href = "/?conv=" + CHAT.convId;
+});
 document.getElementById("chat-send").addEventListener("click", sendChat);
 document.getElementById("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {

@@ -1,11 +1,11 @@
 """FastAPI app: serves the chat UI, /chat endpoint, and conversation CRUD."""
 from __future__ import annotations
 
+import re
+import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
-import re
-from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
@@ -61,6 +61,9 @@ class ChatRequest(BaseModel):
     client_origin: str | None = None
     client_actor_id: str | None = None
     client_actor_name: str | None = None
+    # Client-generated uuid for this turn, used to cancel it mid-flight via
+    # POST /chat/cancel (the ⏹ Stop button).
+    turn_id: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -118,11 +121,55 @@ def auth_me(user: dict | None = Depends(get_current_user)) -> dict:
     }
 
 
+# ── Turn cancellation (the ⏹ Stop button) ───────────────────────────────────
+# A turn runs synchronously in a threadpool worker; POST /chat/cancel runs in a
+# DIFFERENT worker and flips a shared flag that the chat loop checks between
+# rounds. A plain set + lock is enough at this scale.
+_CANCELLED: set[str] = set()
+_CANCEL_LOCK = threading.Lock()
+
+
+def _request_cancel(turn_id: str) -> None:
+    with _CANCEL_LOCK:
+        _CANCELLED.add(turn_id)
+
+
+def _is_cancelled(turn_id: str | None) -> bool:
+    if not turn_id:
+        return False
+    with _CANCEL_LOCK:
+        return turn_id in _CANCELLED
+
+
+def _clear_cancel(turn_id: str | None) -> bool:
+    """Drop the token; return True if it had been cancelled (so the caller can
+    skip persisting the partial turn)."""
+    if not turn_id:
+        return False
+    with _CANCEL_LOCK:
+        was = turn_id in _CANCELLED
+        _CANCELLED.discard(turn_id)
+        return was
+
+
+class CancelRequest(BaseModel):
+    turn_id: str
+
+
+@app.post("/chat/cancel")
+def chat_cancel(req: CancelRequest) -> dict:
+    """Flag an in-flight turn for cancellation. No auth: the token is an
+    unguessable uuid the client just generated for its own turn."""
+    _request_cancel(req.turn_id)
+    return {"ok": True}
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat_endpoint(
     req: ChatRequest,
     user: dict | None = Depends(get_current_user),
 ) -> ChatResponse:
+    cancel_check = (lambda: _is_cancelled(req.turn_id)) if req.turn_id else None
     if user is None:
         # Guest web di default: chat ephemera lato client. Il bot Telegram puo'
         # optare per una conversazione persistita passando persist_guest=true.
@@ -154,12 +201,16 @@ def chat_endpoint(
                     raise HTTPException(404, f"conversation {conv_id} not found")
                 history = loaded["history"]
 
-            reply, history = chat(req.message, history, conversation_id=conv_id, user=None)
-            conv.save_conversation(conv_id, history)
+            reply, history = chat(req.message, history, conversation_id=conv_id,
+                                  user=None, cancel_check=cancel_check)
+            if not _clear_cancel(req.turn_id):
+                conv.save_conversation(conv_id, history)  # skip persist if cancelled
             return ChatResponse(reply=reply, history=history, conversation_id=conv_id)
 
         history = req.history or []
-        reply, history = chat(req.message, history, conversation_id=None, user=None)
+        reply, history = chat(req.message, history, conversation_id=None,
+                              user=None, cancel_check=cancel_check)
+        _clear_cancel(req.turn_id)
         return ChatResponse(reply=reply, history=history, conversation_id=0)
 
     # Owner: chat condivisa tra owner, persistita in `conversations`.
@@ -180,8 +231,10 @@ def chat_endpoint(
             raise HTTPException(403, "cannot continue another user's conversation")
         history = loaded["history"]
 
-    reply, history = chat(req.message, history, conversation_id=conv_id, user=user)
-    conv.save_conversation(conv_id, history)
+    reply, history = chat(req.message, history, conversation_id=conv_id,
+                          user=user, cancel_check=cancel_check)
+    if not _clear_cancel(req.turn_id):
+        conv.save_conversation(conv_id, history)  # cancelled → don't persist the partial turn
     return ChatResponse(reply=reply, history=history, conversation_id=conv_id)
 
 
@@ -454,6 +507,7 @@ def library_filter(req: FilterRequest) -> dict:
     # pre-filtering (the UI no longer exposes them) — the description
     # embedding already captures genre, so this loses little.
     semantic_ids: list[int] | None = None
+    top_matches: list[dict] = []
     sq = (args.get("semantic_query") or "").strip()
     if sq:
         max_w = (_TIER_TO_MAX_WEIGHT.get(filters["complexity_max_tier"])
@@ -473,16 +527,26 @@ def library_filter(req: FilterRequest) -> dict:
             k=20,
         )
         semantic_ids = [r["id"] for r in results]
+        top_matches = [{"name": r["name"], "score": r["score"]} for r in results[:5]]
 
     # Did the model actually pick anything up? If not (e.g. "quanti giochi ho?"),
     # the frontend should NOT wipe the user's existing manual filters.
     has_any = any(v not in (None, [], "") for v in filters.values()) or bool(semantic_ids)
+    # Reasoning payload powers the "Perché questi giochi?" panel: it makes the
+    # filter transparent (what was extracted, structured vs semantic, scores).
+    reasoning = {
+        "path": "semantic" if sq else "structured",
+        "extracted": filters,
+        "semantic_query": sq or None,
+        "top_matches": top_matches,
+    }
     return {
         "filters": filters,
         "semantic_ids": semantic_ids,
         "message": message,
         "reset": False,
         "applied": has_any,
+        "reasoning": reasoning,
     }
 
 

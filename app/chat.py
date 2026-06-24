@@ -16,6 +16,7 @@ import functools
 import inspect
 import json
 import sys
+from collections.abc import Callable
 from typing import Any
 
 from .llm import TextBlock, ToolUseBlock, get_provider
@@ -408,7 +409,8 @@ def _summarize_result(value: Any, serialized: str) -> str:
 
 def chat(user_message: str, history: list[dict] | None = None,
          conversation_id: int | None = None,
-         user: dict | None = None) -> tuple[str, list[dict]]:
+         user: dict | None = None,
+         cancel_check: Callable[[], bool] | None = None) -> tuple[str, list[dict]]:
     """Run one user turn through the configured LLM with tool-use.
 
     Args:
@@ -418,6 +420,10 @@ def chat(user_message: str, history: list[dict] | None = None,
       user: dict {'id','username','role'} se autenticato, None se guest.
             Determina QUALI tool sono esposti al modello e cosa va nel
             `_source` del audit log.
+      cancel_check: callable opzionale interrogato all'inizio di OGNI round; se
+            ritorna True il turno si ferma e torna "interrotto". Cooperativo:
+            controlla tra un round e l'altro, NON interrompe un singolo tool
+            già in esecuzione (un OCR/download a metà finisce comunque).
 
     Returns (reply_text, updated_history).
     """
@@ -448,6 +454,12 @@ def chat(user_message: str, history: list[dict] | None = None,
          f"tools={len(tools_visible)}/{len(TOOLS)} user={user_preview!r}")
 
     for round_idx in range(1, MAX_TOOL_ROUNDS + 1):
+        # Cooperative cancellation: the user hit ⏹. Bail BEFORE the next LLM
+        # call so we don't burn another round. Granularity is per-round — a tool
+        # already running this round still finishes.
+        if cancel_check is not None and cancel_check():
+            _log(f"conv={conv} round={round_idx} CANCELLED by user")
+            return "⏹ Richiesta interrotta.", history
         resp = provider.run_turn(history, system_prompt, tools_visible)
         history.append(resp.assistant_history_entry)
 

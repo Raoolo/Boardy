@@ -339,6 +339,8 @@
     cursor: pointer; font-family: inherit;
   }
   button.send:disabled { opacity: 0.5; cursor: progress; }
+  /* Stop mode: the same button turns into ⏹ while a turn is in flight. */
+  button.send.stop { background: #c8553d; color: #fff; }
   /* Tasto "allega foto del regolamento" accanto a Invia. Icona, stile defilato. */
   button.attach {
     flex: 0 0 auto; width: 44px; padding: 0; border-radius: 10px;
@@ -880,13 +882,40 @@
   // Topbar "Nuova chat" reuses the sidebar button's full logic.
   newBtnTop.addEventListener('click', () => newBtn.click());
 
+  // Send-button double duty: "Invia" normally, "⏹" (Stop) while a turn is in
+  // flight. inFlight holds the AbortController + the turn_id we send so the
+  // server can cancel the tool-loop between rounds.
+  let inFlight = null;  // { controller, turnId, typingEl }
+
+  function setSendMode(stop) {
+    btn.textContent = stop ? '⏹' : 'Invia';
+    btn.classList.toggle('stop', stop);
+    btn.title = stop ? 'Interrompi' : '';
+  }
+
+  function stopTurn() {
+    if (!inFlight) return;
+    const { controller, turnId, typingEl } = inFlight;
+    controller.abort();
+    // Best-effort server-side cancel: stops the tool-loop at the next round
+    // boundary (a tool already running this round still finishes).
+    fetch('/chat/cancel', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ turn_id: turnId }),
+    }).catch(() => {});
+    if (typingEl) { typingEl.classList.remove('typing'); typingEl.textContent = '⏹ Interrotto'; }
+    inFlight = null;
+    setSendMode(false);
+    input.focus();
+  }
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (currentScope === 'audit') return;
+    if (inFlight) { stopTurn(); return; }   // button is in ⏹ mode → stop the turn
     const message = input.value.trim();
     if (!message) return;
     input.value = '';
-    btn.disabled = true;
     // Fade out the empty-state splash (title + example chips) on the first
     // message of a chat, then remove it once the animation ends.
     const splashEl = chat.querySelector('.splash');
@@ -902,16 +931,21 @@
     typing.innerHTML = '<span></span><span></span><span></span>';
     chat.appendChild(typing);
     chat.scrollTop = chat.scrollHeight;
+    const controller = new AbortController();
+    const turnId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+    inFlight = { controller, turnId, typingEl: typing };
+    setSendMode(true);   // button becomes ⏹
     try {
       // Guest: invia l'intero history (vive in sessionStorage del browser).
       // Owner: invia solo conversation_id, il server carica history dal DB.
       const payload = isGuest
-        ? { message, history }
-        : { message, conversation_id: convId };
+        ? { message, history, turn_id: turnId }
+        : { message, conversation_id: convId, turn_id: turnId };
       const res = await fetch('/chat', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
@@ -927,17 +961,35 @@
         if (wasNew) await loadList();
       }
     } catch (err) {
-      typing.classList.remove('typing');
-      typing.textContent = 'Errore: ' + err.message;
-    } finally {
-      if (currentScope !== 'audit') {
-        btn.disabled = false;
-        input.focus();
+      // AbortError = the user hit ⏹; stopTurn() already updated the UI.
+      if (err.name !== 'AbortError') {
+        typing.classList.remove('typing');
+        typing.textContent = 'Errore: ' + err.message;
       }
+    } finally {
+      inFlight = null;
+      setSendMode(false);
+      if (currentScope !== 'audit') input.focus();
     }
   });
 
+  // Handoff dalle altre pagine ("↗ Apri in chat completa"):
+  //  ?seed=<testo>  → prefilla l'input (NON invia), guest+owner.
+  //  ?conv=<id>     → apre quella conversazione (solo owner).
+  function applySeed(seed) {
+    if (!seed) return;
+    input.value = seed;
+    input.focus();
+    try { input.setSelectionRange(input.value.length, input.value.length); } catch (_) {}
+  }
+
   (async () => {
+    const params = new URLSearchParams(location.search);
+    const seed = params.get('seed');
+    const wantConv = parseInt(params.get('conv') || '0') || null;
+    // Ripulisci subito i param così un refresh non ri-seeda / non riapre.
+    if (seed || wantConv) window.history.replaceState({}, '', location.pathname);
+
     // Auth gate prima di qualsiasi fetch: decide modalita' guest vs owner.
     const authState = await BoardyAuth.state();
     isGuest = !authState.authenticated;
@@ -955,17 +1007,21 @@
       } catch (_) { history = []; }
       convId = null;
       rerender();
+      applySeed(seed);
       return;
     }
     // Owner: comportamento storico — carica lista chat, riprendi l'ultima se id valido.
     await loadList();
-    if (convId && convsCache.some(c => c.id === convId)) {
+    if (wantConv && convsCache.some(c => c.id === wantConv)) {
+      await loadConv(wantConv);           // handoff: apri la conv passata da /sleeves o /wishlist
+    } else if (convId && convsCache.some(c => c.id === convId)) {
       await loadConv(convId);
     } else {
       setConvId(null);
       history = [];
       rerender();
     }
+    applySeed(seed);
   })();
 
   // ---- Drag-and-drop PDF upload ----
